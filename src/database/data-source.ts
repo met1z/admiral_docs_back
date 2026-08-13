@@ -9,10 +9,7 @@ export default new DataSource({
   username: process.env.DATABASE_USERNAME ?? 'postgres',
   password: process.env.DATABASE_PASSWORD ?? 'postgres',
   database: process.env.DATABASE_NAME ?? 'admiral_docs',
-  ssl:
-    (process.env.DATABASE_SSL ?? 'false') === 'true'
-      ? { rejectUnauthorized: false }
-      : false,
+  ssl: (process.env.DATABASE_SSL ?? 'false') === 'true' ? { rejectUnauthorized: false } : false,
   synchronize: false,
   logging: false,
   entities: ['src/**/*.entity.ts'],

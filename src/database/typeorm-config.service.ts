@@ -16,9 +16,10 @@ export class TypeOrmConfigService implements TypeOrmOptionsFactory {
       username: this.configService.get<string>('DATABASE_USERNAME', 'postgres'),
       password: this.configService.get<string>('DATABASE_PASSWORD', 'postgres'),
       database: this.configService.get<string>('DATABASE_NAME', 'admiral_docs'),
-      ssl: this.configService.get<string>('DATABASE_SSL', 'false') === 'true'
-        ? { rejectUnauthorized: false }
-        : false,
+      ssl:
+        this.configService.get<string>('DATABASE_SSL', 'false') === 'true'
+          ? { rejectUnauthorized: false }
+          : false,
       synchronize,
       autoLoadEntities: true,
       migrationsRun: false,
