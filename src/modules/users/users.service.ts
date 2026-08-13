@@ -60,4 +60,12 @@ export class UsersService {
   async hashPassword(password: string): Promise<string> {
     return argon2.hash(password);
   }
+
+  async updatePassword(userId: number, password: string): Promise<void> {
+    const passwordHash = await this.hashPassword(password);
+
+    await this.usersRepository.update(userId, {
+      passwordHash,
+    });
+  }
 }
