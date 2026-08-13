@@ -6,8 +6,10 @@ import { Repository } from 'typeorm';
 import { v4 as uuidv4 } from 'uuid';
 
 import { AuthenticatedUser } from '../../common/types/authenticated-user.type';
+import { RefreshTokenPayload } from '../../common/types/refresh-token-payload.type';
 import { EmailService } from '../notifications/email.service';
 import { InviteTokenEntity } from './entities/invite-token.entity';
+import { RefreshSessionEntity } from './entities/refresh-session.entity';
 import { PasswordResetTokenEntity } from './entities/password-reset-token.entity';
 import { LoginDto } from '../users/dto/login.dto';
 import { ForgotPasswordDto } from './dto/forgot-password.dto';
@@ -27,6 +29,8 @@ export class AuthService {
     private readonly inviteTokensRepository: Repository<InviteTokenEntity>,
     @InjectRepository(PasswordResetTokenEntity)
     private readonly passwordResetTokensRepository: Repository<PasswordResetTokenEntity>,
+    @InjectRepository(RefreshSessionEntity)
+    private readonly refreshSessionsRepository: Repository<RefreshSessionEntity>,
     private readonly usersService: UsersService,
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
@@ -35,27 +39,7 @@ export class AuthService {
 
   async login(dto: LoginDto): Promise<AuthResponseDto> {
     const user = await this.validateUser(dto.email, dto.password);
-
-    const payload: AuthenticatedUser = {
-      userId: user.id,
-      email: user.email,
-      role: user.role,
-    };
-
-    const accessToken = await this.jwtService.signAsync(payload, {
-      secret: this.getJwtSecret(),
-      expiresIn: '1d',
-    });
-    const refreshToken = await this.jwtService.signAsync(payload, {
-      secret: this.getRefreshJwtSecret(),
-      expiresIn: '30d',
-    });
-
-    return {
-      accessToken,
-      refreshToken,
-      user: this.toUserDto(user),
-    };
+    return this.issueTokens(user);
   }
 
   async me(userId: number): Promise<AuthResponseDto['user']> {
@@ -65,9 +49,10 @@ export class AuthService {
 
   async refresh(dto: RefreshTokenDto): Promise<AuthResponseDto> {
     const payload = await this.verifyRefreshToken(dto.refreshToken);
-    const user = await this.usersService.findById(payload.userId);
+    const session = await this.findValidRefreshSession(payload.sessionId, payload.userId);
 
-    return this.issueTokens(user);
+    const user = await this.usersService.findById(session.userId);
+    return this.rotateRefreshSession(user, session);
   }
 
   async inviteUser(dto: InviteUserDto): Promise<boolean> {
@@ -78,6 +63,7 @@ export class AuthService {
       throw new ConflictException('Користувач із цим email вже існує');
     }
 
+    await this.inviteTokensRepository.delete({ email });
     const token = uuidv4();
     const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
 
@@ -122,6 +108,15 @@ export class AuthService {
     const user = await this.usersService.findByEmail(dto.email);
 
     if (user) {
+      const recentResetToken = await this.passwordResetTokensRepository.findOne({
+        where: { userId: user.id },
+        order: { createdAt: 'DESC' },
+      });
+
+      if (recentResetToken && recentResetToken.createdAt.getTime() > Date.now() - 10 * 60 * 1000) {
+        throw new ConflictException('Запит на відновлення пароля вже нещодавно надсилали');
+      }
+
       const token = uuidv4();
       const expiresAt = new Date(Date.now() + 60 * 60 * 1000);
 
@@ -142,9 +137,21 @@ export class AuthService {
   async resetPassword(dto: ResetPasswordDto): Promise<boolean> {
     const resetToken = await this.findValidPasswordResetTokenByToken(dto.token);
     await this.usersService.updatePassword(resetToken.userId, dto.password);
+    await this.passwordResetTokensRepository.delete({ userId: resetToken.userId });
+    await this.refreshSessionsRepository.update(
+      { userId: resetToken.userId },
+      { revokedAt: new Date(), replacedBySessionId: null },
+    );
 
-    resetToken.usedAt = new Date();
-    await this.passwordResetTokensRepository.save(resetToken);
+    return true;
+  }
+
+  async logout(dto: RefreshTokenDto): Promise<boolean> {
+    const payload = await this.verifyRefreshToken(dto.refreshToken);
+    const session = await this.findValidRefreshSession(payload.sessionId, payload.userId);
+
+    session.revokedAt = new Date();
+    await this.refreshSessionsRepository.save(session);
 
     return true;
   }
@@ -166,6 +173,28 @@ export class AuthService {
   }
 
   private async issueTokens(user: UserEntity): Promise<AuthResponseDto> {
+    const refreshSession = await this.createRefreshSession(user.id);
+    return this.buildAuthResponse(user, refreshSession.sessionId);
+  }
+
+  private async rotateRefreshSession(
+    user: UserEntity,
+    currentSession: RefreshSessionEntity,
+  ): Promise<AuthResponseDto> {
+    const nextSession = await this.createRefreshSession(user.id);
+
+    currentSession.revokedAt = new Date();
+    currentSession.replacedBySessionId = nextSession.sessionId;
+    currentSession.lastUsedAt = new Date();
+    await this.refreshSessionsRepository.save(currentSession);
+
+    return this.buildAuthResponse(user, nextSession.sessionId);
+  }
+
+  private async buildAuthResponse(
+    user: UserEntity,
+    refreshSessionId: string,
+  ): Promise<AuthResponseDto> {
     const payload: AuthenticatedUser = {
       userId: user.id,
       email: user.email,
@@ -177,7 +206,12 @@ export class AuthService {
       expiresIn: '1d',
     });
 
-    const refreshToken = await this.jwtService.signAsync(payload, {
+    const refreshTokenPayload: RefreshTokenPayload = {
+      ...payload,
+      sessionId: refreshSessionId,
+    };
+
+    const refreshToken = await this.jwtService.signAsync(refreshTokenPayload, {
       secret: this.getRefreshJwtSecret(),
       expiresIn: '30d',
     });
@@ -189,14 +223,45 @@ export class AuthService {
     };
   }
 
-  private async verifyRefreshToken(token: string): Promise<AuthenticatedUser> {
+  private async verifyRefreshToken(token: string): Promise<RefreshTokenPayload> {
     try {
-      return await this.jwtService.verifyAsync<AuthenticatedUser>(token, {
+      return await this.jwtService.verifyAsync<RefreshTokenPayload>(token, {
         secret: this.getRefreshJwtSecret(),
       });
     } catch {
       throw new UnauthorizedException('Недійсний або прострочений refresh токен');
     }
+  }
+
+  private async createRefreshSession(userId: number): Promise<RefreshSessionEntity> {
+    const sessionId = uuidv4();
+    const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+
+    return this.refreshSessionsRepository.save({
+      sessionId,
+      userId,
+      expiresAt,
+      revokedAt: null,
+      replacedBySessionId: null,
+      lastUsedAt: new Date(),
+    });
+  }
+
+  private async findValidRefreshSession(
+    sessionId: string,
+    userId: number,
+  ): Promise<RefreshSessionEntity> {
+    const session = await this.refreshSessionsRepository.findOne({
+      where: { sessionId, userId },
+    });
+
+    if (!session || session.revokedAt || session.expiresAt <= new Date()) {
+      throw new UnauthorizedException('Недійсна або прострочена refresh-сесія');
+    }
+
+    session.lastUsedAt = new Date();
+    await this.refreshSessionsRepository.save(session);
+    return session;
   }
 
   private async findValidInviteByToken(token: string): Promise<InviteTokenEntity> {

@@ -2,6 +2,7 @@ import { Body, Controller, Get, Post } from '@nestjs/common';
 
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Public } from '../../common/decorators/public.decorator';
+import { RateLimit } from '../../common/decorators/rate-limit.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { AuthenticatedUser } from '../../common/types/authenticated-user.type';
 import { Role } from '../users/user-role.enum';
@@ -18,6 +19,7 @@ export class AuthController {
   constructor(private readonly authService: AuthService) {}
 
   @Public()
+  @RateLimit({ limit: 5, ttlMs: 60_000 })
   @Post('login')
   login(@Body() dto: LoginDto) {
     return this.authService.login(dto);
@@ -30,6 +32,7 @@ export class AuthController {
   }
 
   @Public()
+  @RateLimit({ limit: 5, ttlMs: 60_000 })
   @Post('register')
   register(@Body() dto: RegisterWithInviteDto) {
     return this.authService.registerWithInvite(dto);
@@ -42,6 +45,7 @@ export class AuthController {
   }
 
   @Public()
+  @RateLimit({ limit: 5, ttlMs: 60_000 })
   @Post('forgot-password')
   forgotPassword(@Body() dto: ForgotPasswordDto): Promise<boolean> {
     return this.authService.forgotPassword(dto);
@@ -51,6 +55,12 @@ export class AuthController {
   @Post('reset-password')
   resetPassword(@Body() dto: ResetPasswordDto): Promise<boolean> {
     return this.authService.resetPassword(dto);
+  }
+
+  @Public()
+  @Post('logout')
+  logout(@Body() dto: RefreshTokenDto): Promise<boolean> {
+    return this.authService.logout(dto);
   }
 
   @Get('me')

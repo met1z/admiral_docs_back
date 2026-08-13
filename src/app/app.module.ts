@@ -7,6 +7,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { JwtAuthGuard, RolesGuard } from '../common/guards';
+import { RateLimitGuard } from '../common/guards/rate-limit.guard';
 import { AuthModule } from '../modules/auth/auth.module';
 import { databaseConfig } from '../database/database.config';
 import { UsersModule } from '../modules/users/users.module';
@@ -33,6 +34,10 @@ import { UsersModule } from '../modules/users/users.module';
     {
       provide: APP_GUARD,
       useClass: RolesGuard,
+    },
+    {
+      provide: APP_GUARD,
+      useClass: RateLimitGuard,
     },
   ],
 })
