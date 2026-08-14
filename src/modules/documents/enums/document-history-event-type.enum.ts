@@ -1,0 +1,16 @@
+export enum DocumentHistoryEventType {
+  CREATED = 'created',
+  DELETED = 'deleted',
+  NAME_REPLACED = 'name_replaced',
+  FILE_REPLACED = 'file_replaced',
+  SENT_FOR_SIGNING = 'sent_for_signing',
+  SIGNED = 'signed',
+  SENT_FOR_ADDITIONAL_APPROVAL = 'sent_for_additional_approval',
+  ADDITIONAL_APPROVAL_REJECTED = 'additional_approval_rejected',
+  ADDITIONAL_APPROVAL_ACCEPTED = 'additional_approval_accepted',
+  REJECTED = 'rejected',
+  RETURNED_FOR_REVISION = 'returned_for_revision',
+  RESUBMITTED = 'resubmitted',
+  COMPLETED = 'completed',
+}
+

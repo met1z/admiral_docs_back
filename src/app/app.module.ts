@@ -11,6 +11,7 @@ import { RateLimitGuard } from '../common/guards/rate-limit.guard';
 import { AuthModule } from '../modules/auth/auth.module';
 import { databaseConfig } from '../database/database.config';
 import { UsersModule } from '../modules/users/users.module';
+import { DocumentsModule } from '../modules/documents/documents.module';
 
 @Module({
   imports: [
@@ -22,6 +23,7 @@ import { UsersModule } from '../modules/users/users.module';
     JwtModule.register({}),
     UsersModule,
     AuthModule,
+    DocumentsModule,
   ],
   controllers: [AppController],
   providers: [

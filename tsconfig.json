@@ -15,7 +15,7 @@
     "strict": true,
     "esModuleInterop": true,
     "moduleResolution": "node",
-    "types": ["node"]
+    "types": ["node", "jest"]
   },
   "include": ["src/**/*.ts", "test/**/*.ts"],
   "exclude": ["node_modules", "dist"]
