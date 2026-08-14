@@ -193,9 +193,8 @@ smokeDescribe('R2StorageService smoke', () => {
         const body = await bodyToBuffer(object.Body);
         expect(body.equals(payload)).toBe(true);
       } finally {
-        // await storageService.deleteObject(key).catch(() => undefined);
-
-        // await waitForDeletion(s3Client, env.R2_BUCKET_NAME, key);
+        await storageService.deleteObject(key).catch(() => undefined);
+        await waitForDeletion(s3Client, env.R2_BUCKET_NAME, key);
       }
     },
     45_000,
