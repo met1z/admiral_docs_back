@@ -2,16 +2,22 @@ import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
   DeleteObjectCommand,
+  GetObjectCommand,
   PutObjectCommand,
   S3Client,
 } from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 
 @Injectable()
 export class R2StorageService {
+  private static readonly signedUrlExpiresInSeconds = 16 * 60 * 60;
+  private static readonly signedUrlCacheTtlMs = 15 * 60 * 60 * 1000;
+
   private readonly client: S3Client;
   private readonly accountId: string;
   private readonly bucketName: string;
   private readonly publicBaseUrl: string | null;
+  private readonly signedUrlCache = new Map<string, { url: string; expiresAt: number }>();
 
   constructor(private readonly configService: ConfigService) {
     const accountId = this.configService.get<string>('R2_ACCOUNT_ID');
@@ -66,6 +72,46 @@ export class R2StorageService {
         Key: key,
       }),
     );
+  }
+
+  async createSignedGetUrl(input: {
+    key: string;
+    fileName: string;
+    mimeType: string;
+    disposition: 'inline' | 'attachment';
+    expiresInSeconds?: number;
+  }): Promise<string> {
+    const cacheKey = [
+      input.key,
+      input.fileName,
+      input.mimeType,
+      input.disposition,
+      input.expiresInSeconds ?? R2StorageService.signedUrlExpiresInSeconds,
+    ].join(':');
+    const cached = this.signedUrlCache.get(cacheKey);
+    const now = Date.now();
+
+    if (cached && cached.expiresAt > now) {
+      return cached.url;
+    }
+
+    const command = new GetObjectCommand({
+      Bucket: this.bucketName,
+      Key: input.key,
+      ResponseContentType: input.mimeType,
+      ResponseContentDisposition: `${input.disposition}; filename="${this.escapeHeaderValue(input.fileName)}"`,
+    });
+
+    return getSignedUrl(this.client, command, {
+      expiresIn: input.expiresInSeconds ?? R2StorageService.signedUrlExpiresInSeconds,
+    }).then((url) => {
+      this.signedUrlCache.set(cacheKey, {
+        url,
+        expiresAt: now + R2StorageService.signedUrlCacheTtlMs,
+      });
+
+      return url;
+    });
   }
 
   buildPublicUrl(key: string): string {

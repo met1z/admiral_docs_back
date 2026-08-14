@@ -37,6 +37,8 @@ type QbMock = {
   leftJoin: jest.Mock;
   orderBy: jest.Mock;
   addOrderBy: jest.Mock;
+  addSelect: jest.Mock;
+  setParameter: jest.Mock;
   skip: jest.Mock;
   take: jest.Mock;
   select: jest.Mock;
@@ -65,6 +67,8 @@ const createQbMock = (): { qb: QbMock; countQb: QbMock } => {
     leftJoin: jest.fn().mockReturnThis(),
     orderBy: jest.fn().mockReturnThis(),
     addOrderBy: jest.fn().mockReturnThis(),
+    addSelect: jest.fn().mockReturnThis(),
+    setParameter: jest.fn().mockReturnThis(),
     skip: jest.fn().mockReturnThis(),
     take: jest.fn().mockReturnThis(),
     select: jest.fn().mockReturnThis(),
@@ -83,6 +87,8 @@ const createQbMock = (): { qb: QbMock; countQb: QbMock } => {
     leftJoin: jest.fn().mockReturnThis(),
     orderBy: jest.fn().mockReturnThis(),
     addOrderBy: jest.fn().mockReturnThis(),
+    addSelect: jest.fn().mockReturnThis(),
+    setParameter: jest.fn().mockReturnThis(),
     skip: jest.fn().mockReturnThis(),
     take: jest.fn().mockReturnThis(),
     select: jest.fn().mockReturnThis(),
@@ -127,8 +133,8 @@ describe('DocumentsService', () => {
   let documentFilesRepository: RepoMock<unknown>;
   let documentParticipantsRepository: RepoMock<unknown>;
   let documentHistoryEventsRepository: RepoMock<unknown>;
-  let usersService: { findById: jest.Mock };
-  let r2StorageService: { uploadBuffer: jest.Mock; deleteObject: jest.Mock };
+  let usersService: { findById: jest.Mock; findByIds: jest.Mock };
+  let r2StorageService: { uploadBuffer: jest.Mock; deleteObject: jest.Mock; createSignedGetUrl: jest.Mock };
   let qb: QbMock;
   let countQb: QbMock;
 
@@ -148,10 +154,20 @@ describe('DocumentsService', () => {
         }
         return user;
       }),
+      findByIds: jest.fn(async (ids: number[]) => ids.map((id) => {
+        const user = users.get(id);
+        if (!user) {
+          throw new Error(`User ${id} not found`);
+        }
+        return user;
+      })),
     };
     r2StorageService = {
       uploadBuffer: jest.fn(),
       deleteObject: jest.fn(),
+      createSignedGetUrl: jest.fn(async (input: { key: string; disposition: string }) =>
+        `signed://${input.disposition}/${input.key}`,
+      ),
     };
 
     users.clear();
@@ -194,17 +210,62 @@ describe('DocumentsService', () => {
     expect(result.map((item: { id: number }) => item.id)).toEqual([3, 1, 2]);
   });
 
+  it('lists documents with current action metadata in a single query', async () => {
+    const currentUser = { ...actor };
+
+    qb.getRawMany.mockResolvedValue([
+      {
+        document_id: 100,
+        document_type_id: 10,
+        document_created_by_user_id: 1,
+        document_name: 'Main contract',
+        document_status: DocumentStatus.IN_PROGRESS,
+        document_submission_round: 1,
+        document_last_rejection_reason: null,
+        document_last_rejected_by_user_id: null,
+        document_last_rejected_at: null,
+        document_completed_at: null,
+        document_created_at: new Date('2026-08-14T10:00:00Z'),
+        document_updated_at: new Date('2026-08-14T10:00:00Z'),
+        document_type_name: 'Contract',
+        creator_first_name: 'Owner',
+        creator_last_name: 'One',
+        creator_email: 'owner@test.com',
+        current_action_user_id: 2,
+        current_action_first_name: 'Signer',
+        current_action_last_name: 'Two',
+        current_action_email: 'signer@test.com',
+      },
+    ]);
+    countQb.getCount.mockResolvedValue(1);
+
+    const result = await service.list({ page: 1, limit: 10 } as DocumentQueryDto, currentUser);
+
+    expect(documentParticipantsRepository.find).not.toHaveBeenCalled();
+    expect(usersService.findById).not.toHaveBeenCalled();
+    expect(qb.setParameter).toHaveBeenCalledWith('additionalApproverType', DocumentParticipantType.ADDITIONAL_APPROVER);
+    const currentActionJoin = qb.leftJoin.mock.calls.find(([, alias]) => alias === 'current_action_participant');
+    expect(currentActionJoin?.[2]).toContain('CASE');
+    expect(result.items[0]).toEqual(
+      expect.objectContaining({
+        id: 100,
+        currentActionFullName: 'Signer Two',
+        requiresAction: false,
+      }),
+    );
+  });
+
   it('uploads a supported file to R2 and rejects invalid files', async () => {
     r2StorageService.uploadBuffer.mockResolvedValue({
-      key: 'documents/tmp/1/file.txt',
-      publicUrl: 'https://public.example/documents/tmp/1/file.txt',
+      key: 'documents/tmp/1/file.pdf',
+      publicUrl: 'https://public.example/documents/tmp/1/file.pdf',
     });
 
     const uploaded = await service.uploadStorageFile(
       {
         buffer: Buffer.from('hello'),
-        mimetype: 'text/plain',
-        originalname: 'file.txt',
+        mimetype: 'application/pdf',
+        originalname: 'file.pdf',
         size: 12,
       } as Express.Multer.File,
       actor,
@@ -213,16 +274,16 @@ describe('DocumentsService', () => {
     expect(r2StorageService.uploadBuffer).toHaveBeenCalledWith(
       expect.objectContaining({
         key: expect.stringContaining('documents/tmp/1/'),
-        mimeType: 'text/plain',
-        fileName: 'file.txt',
+        mimeType: 'application/pdf',
+        fileName: 'file.pdf',
       }),
     );
     expect(uploaded).toEqual(
       expect.objectContaining({
-        mimeType: 'text/plain',
-        storageKey: 'documents/tmp/1/file.txt',
-        url: 'https://public.example/documents/tmp/1/file.txt',
-        originalFileName: 'file.txt',
+        mimeType: 'application/pdf',
+        storageKey: 'documents/tmp/1/file.pdf',
+        url: 'https://public.example/documents/tmp/1/file.pdf',
+        originalFileName: 'file.pdf',
       }),
     );
 
@@ -230,8 +291,8 @@ describe('DocumentsService', () => {
       service.uploadStorageFile(
         {
           buffer: Buffer.from('x'),
-          mimetype: 'application/pdf',
-          originalname: 'doc.pdf',
+          mimetype: 'application/x-msdownload',
+          originalname: 'doc.exe',
           size: 4,
         } as Express.Multer.File,
         actor,
@@ -341,8 +402,8 @@ describe('DocumentsService', () => {
         name: 'Main contract',
         currentFile: expect.objectContaining({
           url: 'https://cdn.example/file.txt',
-          previewUrl: 'https://cdn.example/file.txt',
-          downloadUrl: 'https://cdn.example/file.txt',
+          previewUrl: 'signed://inline/documents/1/file.txt',
+          downloadUrl: 'signed://attachment/documents/1/file.txt',
         }),
         participants: expect.arrayContaining([
           expect.objectContaining({ userEmail: 'signer@test.com' }),
@@ -804,10 +865,10 @@ describe('DocumentsService', () => {
     usersService.findById.mockImplementation(async (id: number) => users.get(id)!);
 
     await expect(service.getFileViewUrl(10, actor)).resolves.toEqual({
-      url: 'https://cdn.example/file.txt',
+      url: 'signed://inline/docs/10/file.txt',
     });
     await expect(service.getFileDownloadUrl(10, actor)).resolves.toEqual({
-      url: 'https://cdn.example/file.txt',
+      url: 'signed://attachment/docs/10/file.txt',
     });
   });
 });

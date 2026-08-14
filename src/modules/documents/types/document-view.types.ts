@@ -25,13 +25,16 @@ export type DocumentListItem = {
   myParticipantId: number | null;
   myParticipantStatus: DocumentParticipantStatus | null;
   myParticipantType: DocumentParticipantType | null;
+  currentActionFullName: string | null;
 };
 
 export type DocumentHistoryEventView = {
   id: number;
   actorUserId: number;
+  actorFullName: string;
   participantId: number | null;
   targetUserId: number | null;
+  targetFullName: string | null;
   eventType: DocumentHistoryEventType;
   message: string | null;
   reason: string | null;
@@ -88,4 +91,5 @@ export type DocumentDetailView = {
   myParticipantId: number | null;
   myParticipantStatus: DocumentParticipantStatus | null;
   myParticipantType: DocumentParticipantType | null;
+  currentActionFullName: string | null;
 };

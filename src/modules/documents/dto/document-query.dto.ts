@@ -22,6 +22,10 @@ export class DocumentQueryDto {
   status?: DocumentStatus;
 
   @IsOptional()
+  @IsIn(['active', 'completed'])
+  statusGroup?: 'active' | 'completed';
+
+  @IsOptional()
   @IsString()
   search?: string;
 

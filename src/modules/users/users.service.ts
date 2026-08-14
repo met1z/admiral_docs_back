@@ -1,7 +1,7 @@
 import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import * as argon2 from 'argon2';
-import { Repository } from 'typeorm';
+import { Brackets, Repository } from 'typeorm';
 
 import { CreateUserDto } from './dto/create-user.dto';
 import { UserEntity } from './user.entity';
@@ -41,6 +41,46 @@ export class UsersService {
     return this.usersRepository.findOne({
       where: { email: email.toLowerCase() },
     });
+  }
+
+  async findByIds(ids: number[]): Promise<UserEntity[]> {
+    if (ids.length === 0) {
+      return [];
+    }
+
+    return this.usersRepository
+      .createQueryBuilder('user')
+      .where('user.id IN (:...ids)', { ids })
+      .orderBy('user.id', 'ASC')
+      .getMany();
+  }
+
+  async search(query: string, limit: number): Promise<UserEntity[]> {
+    const normalizedQuery = query.trim().toLowerCase();
+
+    if (!normalizedQuery) {
+      return [];
+    }
+
+    return this.usersRepository
+      .createQueryBuilder('user')
+      .where('user.is_active = true')
+      .andWhere(
+        new Brackets((qb) => {
+          qb.where('LOWER(user.email) LIKE :query', { query: `%${normalizedQuery}%` })
+            .orWhere("LOWER(COALESCE(user.first_name, '')) LIKE :query", { query: `%${normalizedQuery}%` })
+            .orWhere("LOWER(COALESCE(user.last_name, '')) LIKE :query", { query: `%${normalizedQuery}%` })
+            .orWhere(
+              `LOWER(TRIM(CONCAT(COALESCE(user.first_name, ''), ' ', COALESCE(user.last_name, '')))) LIKE :query`,
+              { query: `%${normalizedQuery}%` },
+            );
+        }),
+      )
+      .orderBy('user.last_name', 'ASC')
+      .addOrderBy('user.first_name', 'ASC')
+      .addOrderBy('user.email', 'ASC')
+      .take(limit)
+      .getMany();
   }
 
   async findById(id: number): Promise<UserEntity> {

@@ -19,6 +19,7 @@ import { DocumentParticipantEntity } from './entities/document-participant.entit
 import { DocumentTypeEntity } from './entities/document-type.entity';
 import { DocumentEntity } from './entities/document.entity';
 import { CreateDocumentDto } from './dto/create-document.dto';
+import { CreateDocumentParticipantDto } from './dto/create-document-participant.dto';
 import { DocumentQueryDto, DocumentSortBy } from './dto/document-query.dto';
 import { RejectParticipantDto } from './dto/reject-participant.dto';
 import { SendAdditionalApprovalDto } from './dto/send-additional-approval.dto';
@@ -51,6 +52,10 @@ type DocumentListRawRow = {
   creator_first_name: string | null;
   creator_last_name: string | null;
   creator_email: string | null;
+  current_action_user_id: string | number | null;
+  current_action_first_name: string | null;
+  current_action_last_name: string | null;
+  current_action_email: string | null;
 };
 
 @Injectable()
@@ -87,6 +92,8 @@ export class DocumentsService {
     if (!documentType) {
       throw new NotFoundException('Тип документа не знайдено');
     }
+
+    this.assertSequentialParticipants(dto.participants);
 
     const document = await this.documentsRepository.save(
       this.documentsRepository.create({
@@ -169,7 +176,7 @@ export class DocumentsService {
       throw new BadRequestException('Файл не передано');
     }
 
-    this.assertSupportedUploadFile(file.mimetype, file.size);
+    this.assertSupportedUploadFile(file.mimetype, file.size, file.originalname);
 
     const safeName = this.sanitizeFileName(file.originalname);
     const storageKey = `documents/tmp/${actor.userId}/${Date.now()}-${randomUUID()}-${safeName}`;
@@ -202,9 +209,31 @@ export class DocumentsService {
     const qb = this.documentsRepository
       .createQueryBuilder('document')
       .leftJoin(DocumentTypeEntity, 'document_type', 'document_type.id = document.type_id')
-      .leftJoin(UserEntity, 'creator', 'creator.id = document.created_by_user_id');
+      .leftJoin(UserEntity, 'creator', 'creator.id = document.created_by_user_id')
+      .leftJoin(
+        'document_participant',
+        'current_action_participant',
+        `current_action_participant.id = (
+          SELECT dp.id
+          FROM document_participant dp
+          WHERE dp.document_id = document.id
+            AND dp.signed_status = :pendingStatus
+          ORDER BY
+            dp.order ASC,
+            CASE
+              WHEN dp.participant_type = :additionalApproverType THEN 0
+              ELSE 1
+            END ASC,
+            dp.created_at ASC,
+            dp.id ASC
+          LIMIT 1
+        )`,
+      )
+      .leftJoin(UserEntity, 'current_action_user', 'current_action_user.id = current_action_participant.user_id');
 
     this.applyDocumentAccessFilter(qb, currentUser.userId);
+    qb.setParameter('pendingStatus', DocumentParticipantStatus.PENDING);
+    qb.setParameter('additionalApproverType', DocumentParticipantType.ADDITIONAL_APPROVER);
 
     if (query.typeId) {
       qb.andWhere('document.type_id = :typeId', { typeId: query.typeId });
@@ -212,6 +241,14 @@ export class DocumentsService {
 
     if (query.status) {
       qb.andWhere('document.status = :status', { status: query.status });
+    }
+
+    if (query.statusGroup === 'completed') {
+      qb.andWhere('document.status = :completedStatus', { completedStatus: DocumentStatus.COMPLETED });
+    } else if (query.statusGroup === 'active') {
+      qb.andWhere('document.status IN (:...activeStatuses)', {
+        activeStatuses: [DocumentStatus.IN_PROGRESS, DocumentStatus.REJECTED],
+      });
     }
 
     if (query.revisionType) {
@@ -281,29 +318,15 @@ export class DocumentsService {
         'creator.first_name AS creator_first_name',
         'creator.last_name AS creator_last_name',
         'creator.email AS creator_email',
+        'current_action_user.id AS current_action_user_id',
+        'current_action_user.first_name AS current_action_first_name',
+        'current_action_user.last_name AS current_action_last_name',
+        'current_action_user.email AS current_action_email',
       ])
       .getRawMany()) as DocumentListRawRow[];
 
-    const documentIds = rawRows.map((row) => Number(row.document_id));
-    const participants = documentIds.length
-      ? await this.documentParticipantsRepository.find({
-          where: { documentId: In(documentIds) },
-          order: {
-            documentId: 'ASC',
-            order: 'ASC',
-            createdAt: 'ASC',
-            id: 'ASC',
-          },
-        })
-      : [];
-
-    const participantsByDocumentId = this.groupParticipantsByDocumentId(participants);
-
     return {
-      items: rawRows.map((row) => {
-        const docParticipants = participantsByDocumentId.get(Number(row.document_id)) ?? [];
-        return this.mapDocumentListItem(row, docParticipants, currentUser.userId);
-      }),
+      items: rawRows.map((row) => this.mapDocumentListItem(row, currentUser.userId)),
       total,
       page,
       limit,
@@ -474,7 +497,16 @@ export class DocumentsService {
       throw new NotFoundException('Файл не знайдено');
     }
 
-    return { url: file.url };
+    return {
+      url: file.storageKey
+        ? await this.r2StorageService.createSignedGetUrl({
+            key: file.storageKey,
+            fileName: file.originalFileName,
+            mimeType: file.mimeType,
+            disposition: 'inline',
+          })
+        : file.url,
+    };
   }
 
   async getFileDownloadUrl(
@@ -490,7 +522,16 @@ export class DocumentsService {
       throw new NotFoundException('Файл не знайдено');
     }
 
-    return { url: file.url };
+    return {
+      url: file.storageKey
+        ? await this.r2StorageService.createSignedGetUrl({
+            key: file.storageKey,
+            fileName: file.originalFileName,
+            mimeType: file.mimeType,
+            disposition: 'attachment',
+          })
+        : file.url,
+    };
   }
 
   async signParticipant(
@@ -843,14 +884,11 @@ export class DocumentsService {
     return grouped;
   }
 
-  private mapDocumentListItem(
-    row: DocumentListRawRow,
-    participants: DocumentParticipantEntity[],
-    currentUserId: number,
-  ): DocumentListItem {
-    const sortedParticipants = this.sortParticipants(participants);
-    const currentActionParticipant = this.getCurrentActionParticipant(sortedParticipants);
-    const myParticipant = sortedParticipants.find((participant) => participant.userId === currentUserId) ?? null;
+  private mapDocumentListItem(row: DocumentListRawRow, currentUserId: number): DocumentListItem {
+    const currentActionUserId = row.current_action_user_id ? Number(row.current_action_user_id) : null;
+    const currentActionFirstName = String(row.current_action_first_name ?? '');
+    const currentActionLastName = String(row.current_action_last_name ?? '');
+    const currentActionEmail = String(row.current_action_email ?? '');
 
     const creatorFirstName = String(row.creator_first_name ?? '');
     const creatorLastName = String(row.creator_last_name ?? '');
@@ -874,10 +912,13 @@ export class DocumentsService {
       completedAt: row.document_completed_at ? new Date(String(row.document_completed_at)) : null,
       createdAt: new Date(String(row.document_created_at)),
       updatedAt: new Date(String(row.document_updated_at)),
-      requiresAction: Boolean(currentActionParticipant && currentActionParticipant.userId === currentUserId),
-      myParticipantId: myParticipant?.id ?? null,
-      myParticipantStatus: myParticipant?.signedStatus ?? null,
-      myParticipantType: myParticipant?.participantType ?? null,
+      requiresAction: currentActionUserId === currentUserId,
+      myParticipantId: null,
+      myParticipantStatus: null,
+      myParticipantType: null,
+      currentActionFullName: currentActionUserId
+        ? [currentActionFirstName, currentActionLastName].filter(Boolean).join(' ') || currentActionEmail
+        : null,
     };
   }
 
@@ -889,7 +930,6 @@ export class DocumentsService {
     history: DocumentHistoryEventEntity[],
     currentUserId: number,
   ): Promise<DocumentDetailView> {
-    const creator = await this.usersService.findById(document.createdByUserId);
     const sortedParticipants = this.sortParticipants(participants);
     const currentActionParticipant = this.getCurrentActionParticipant(sortedParticipants);
     const myParticipant = sortedParticipants.find((participant) => participant.userId === currentUserId) ?? null;
@@ -902,8 +942,15 @@ export class DocumentsService {
       ...history.flatMap((event) => [event.participantId, event.targetUserId]).filter((value): value is number => value !== null),
     ]);
 
-    const users = await Promise.all(Array.from(userIds).map((userId) => this.usersService.findById(userId)));
+    const users = await this.usersService.findByIds(Array.from(userIds));
     const userMap = new Map(users.map((user) => [user.id, user]));
+    const creator = userMap.get(document.createdByUserId);
+
+    if (!creator) {
+      throw new NotFoundException('Користувача не знайдено');
+    }
+
+    const currentActionUser = currentActionParticipant ? userMap.get(currentActionParticipant.userId) ?? null : null;
 
     return {
       id: document.id,
@@ -930,8 +977,22 @@ export class DocumentsService {
             url: currentFile.url,
             originalFileName: currentFile.originalFileName,
             sizeBytes: currentFile.sizeBytes,
-            previewUrl: currentFile.url,
-            downloadUrl: currentFile.url,
+            previewUrl: currentFile.storageKey
+              ? await this.r2StorageService.createSignedGetUrl({
+                  key: currentFile.storageKey,
+                  fileName: currentFile.originalFileName,
+                  mimeType: currentFile.mimeType,
+                  disposition: 'inline',
+                })
+              : currentFile.url,
+            downloadUrl: currentFile.storageKey
+              ? await this.r2StorageService.createSignedGetUrl({
+                  key: currentFile.storageKey,
+                  fileName: currentFile.originalFileName,
+                  mimeType: currentFile.mimeType,
+                  disposition: 'attachment',
+                })
+              : currentFile.url,
           }
         : null,
       participants: sortedParticipants.map((participant) => ({
@@ -950,10 +1011,22 @@ export class DocumentsService {
         isCurrentAction: currentActionParticipant?.id === participant.id,
       })),
       history: history.map((event) => ({
+        actorFullName: (() => {
+          const actor = userMap.get(event.actorUserId);
+
+          return actor ? [actor.firstName, actor.lastName].filter(Boolean).join(' ') || actor.email : '—';
+        })(),
         id: event.id,
         actorUserId: event.actorUserId,
         participantId: event.participantId,
         targetUserId: event.targetUserId,
+        targetFullName: event.targetUserId
+          ? (() => {
+              const target = userMap.get(event.targetUserId);
+
+              return target ? [target.firstName, target.lastName].filter(Boolean).join(' ') || target.email : null;
+            })()
+          : null,
         eventType: event.eventType,
         message: event.message,
         reason: event.reason,
@@ -964,6 +1037,9 @@ export class DocumentsService {
       myParticipantId: myParticipant?.id ?? null,
       myParticipantStatus: myParticipant?.signedStatus ?? null,
       myParticipantType: myParticipant?.participantType ?? null,
+      currentActionFullName: currentActionUser
+        ? [currentActionUser.firstName, currentActionUser.lastName].filter(Boolean).join(' ') || currentActionUser.email
+        : null,
     };
   }
 
@@ -1002,7 +1078,7 @@ export class DocumentsService {
           .orWhere(
             `EXISTS (
               SELECT 1
-              FROM document_participants dp
+              FROM document_participant dp
               WHERE dp.document_id = document.id
                 AND dp.user_id = :accessUserId
             )`,
@@ -1026,7 +1102,7 @@ export class DocumentsService {
             .orWhere(
               `EXISTS (
                 SELECT 1
-                FROM document_participants dp
+                FROM document_participant dp
                 WHERE dp.document_id = document.id
                   AND dp.user_id = :userId
               )`,
@@ -1043,16 +1119,48 @@ export class DocumentsService {
     return document;
   }
 
-  private assertSupportedUploadFile(mimeType: string, sizeBytes: number): void {
+  private assertSequentialParticipants(participants: CreateDocumentParticipantDto[]): void {
+    const orders = participants.map((participant) => participant.order);
+    const sortedOrders = [...orders].sort((left, right) => left - right);
+
+    const uniqueUserIds = new Set(participants.map((participant) => participant.userId));
+    if (uniqueUserIds.size !== participants.length) {
+      throw new BadRequestException('Кожен підписант має бути унікальним');
+    }
+
+    const uniqueOrders = new Set(orders);
+    if (uniqueOrders.size !== participants.length) {
+      throw new BadRequestException('Порядок підписання не може повторюватися');
+    }
+
+    for (let index = 0; index < sortedOrders.length; index += 1) {
+      if (sortedOrders[index] !== index + 1) {
+        throw new BadRequestException('Порядок підписання має починатися з 1 та бути без пропусків');
+      }
+    }
+  }
+
+  private assertSupportedUploadFile(mimeType: string, sizeBytes: number, originalFileName: string): void {
     if (sizeBytes > 40 * 1024 * 1024) {
       throw new BadRequestException('Файл не може бути більший за 40 МБ');
     }
 
-    const isText = mimeType.startsWith('text/');
-    const isImage = mimeType.startsWith('image/');
+    const allowedMimeTypes = new Set([
+      'application/pdf',
+      'application/msword',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'image/jpeg',
+      'image/png',
+      'image/gif',
+      'image/webp',
+      'image/svg+xml',
+    ]);
 
-    if (!isText && !isImage) {
-      throw new BadRequestException('Дозволені тільки текстові файли та зображення');
+    const allowedExtensions = new Set(['pdf', 'doc', 'docx', 'jpg', 'jpeg', 'png', 'gif', 'webp', 'svg']);
+    const extension = originalFileName.split('.').pop()?.toLowerCase() ?? '';
+
+    if (!allowedMimeTypes.has(mimeType) && !allowedExtensions.has(extension)) {
+      throw new BadRequestException('Дозволені тільки PDF, Word та зображення');
     }
   }
 
