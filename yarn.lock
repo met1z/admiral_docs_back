@@ -2372,6 +2372,7 @@ __metadata:
     argon2: "npm:^0.45.1"
     class-transformer: "npm:^0.5.1"
     class-validator: "npm:^0.14.1"
+    content-disposition: "npm:^2.0.1"
     eslint: "npm:^9.33.0"
     jest: "npm:^30.4.2"
     pg: "npm:^8.16.3"
@@ -2379,6 +2380,7 @@ __metadata:
     reflect-metadata: "npm:^0.2.2"
     resend: "npm:^6.20.0"
     rxjs: "npm:^7.8.2"
+    sanitize-filename: "npm:^1.6.3"
     shx: "npm:^0.4.0"
     source-map-support: "npm:^0.5.21"
     ts-jest: "npm:^29.4.12"
@@ -3205,6 +3207,13 @@ __metadata:
   version: 2.15.3
   resolution: "consola@npm:2.15.3"
   checksum: 10c0/34a337e6b4a1349ee4d7b4c568484344418da8fdb829d7d71bfefcd724f608f273987633b6eef465e8de510929907a092e13cb7a28a5d3acb3be446fcc79fd5e
+  languageName: node
+  linkType: hard
+
+"content-disposition@npm:^2.0.1":
+  version: 2.0.1
+  resolution: "content-disposition@npm:2.0.1"
+  checksum: 10c0/8ba0e1f95102343a69a9a4b6f17728209d4ff0402b830b7cda91dcdfbb12eed0201dcd02aaa1e56f9bcf1c5b8ccef4a70e83b58292cf26588d8d5f7d05a0c006
   languageName: node
   linkType: hard
 
@@ -6685,6 +6694,15 @@ __metadata:
   languageName: node
   linkType: hard
 
+"sanitize-filename@npm:^1.6.3":
+  version: 1.6.4
+  resolution: "sanitize-filename@npm:1.6.4"
+  dependencies:
+    truncate-utf8-bytes: "npm:^1.0.0"
+  checksum: 10c0/b56415a95e4f90dc992cd126b5f45c7b39d178662fbd0dc48f03203e35c58ab8e9eb3f5cebfaabc46f1438093d65a3a3cc96875e2b036a1474e19593bee9a540
+  languageName: node
+  linkType: hard
+
 "schema-utils@npm:^3.1.1, schema-utils@npm:^3.2.0":
   version: 3.3.0
   resolution: "schema-utils@npm:3.3.0"
@@ -7332,6 +7350,15 @@ __metadata:
   languageName: node
   linkType: hard
 
+"truncate-utf8-bytes@npm:^1.0.0":
+  version: 1.0.2
+  resolution: "truncate-utf8-bytes@npm:1.0.2"
+  dependencies:
+    utf8-byte-length: "npm:^1.0.1"
+  checksum: 10c0/af2b431fc4314f119b551e5fccfad49d4c0ef82e13ba9ca61be6567801195b08e732ce9643542e8ad1b3df44f3df2d7345b3dd34f723954b6bb43a14584d6b3c
+  languageName: node
+  linkType: hard
+
 "ts-jest@npm:^29.4.12":
   version: 29.4.12
   resolution: "ts-jest@npm:29.4.12"
@@ -7771,6 +7798,13 @@ __metadata:
   dependencies:
     punycode: "npm:^2.1.0"
   checksum: 10c0/4ef57b45aa820d7ac6496e9208559986c665e49447cb072744c13b66925a362d96dd5a46c4530a6b8e203e5db5fe849369444440cb22ecfc26c679359e5dfa3c
+  languageName: node
+  linkType: hard
+
+"utf8-byte-length@npm:^1.0.1":
+  version: 1.0.5
+  resolution: "utf8-byte-length@npm:1.0.5"
+  checksum: 10c0/e69bda3299608f4cc75976da9fb74ac94801a58b9ca29fdad03a20ec952e7477d7f226c12716b5f36bd4cff8151d1d152d02ee1df3752f017d4b2c725ce3e47a
   languageName: node
   linkType: hard
 

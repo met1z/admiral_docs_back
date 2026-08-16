@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
   DeleteObjectCommand,
@@ -7,12 +7,14 @@ import {
   S3Client,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { create as contentDisposition } from 'content-disposition';
 
 @Injectable()
 export class R2StorageService {
   private static readonly signedUrlExpiresInSeconds = 16 * 60 * 60;
   private static readonly signedUrlCacheTtlMs = 15 * 60 * 60 * 1000;
 
+  private readonly logger = new Logger(R2StorageService.name);
   private readonly client: S3Client;
   private readonly accountId: string;
   private readonly bucketName: string;
@@ -49,29 +51,49 @@ export class R2StorageService {
     mimeType: string;
     fileName: string;
   }): Promise<{ key: string; publicUrl: string }> {
-    await this.client.send(
-      new PutObjectCommand({
-        Bucket: this.bucketName,
-        Key: input.key,
-        Body: input.buffer,
-        ContentType: input.mimeType,
-        ContentDisposition: `inline; filename="${this.escapeHeaderValue(input.fileName)}"`,
-      }),
-    );
+    try {
+      await this.client.send(
+        new PutObjectCommand({
+          Bucket: this.bucketName,
+          Key: input.key,
+          Body: input.buffer,
+          ContentType: input.mimeType,
+        }),
+      );
 
-    return {
-      key: input.key,
-      publicUrl: this.buildPublicUrl(input.key),
-    };
+      return {
+        key: input.key,
+        publicUrl: this.buildPublicUrl(input.key),
+      };
+    } catch (error) {
+      this.logAwsError('uploadBuffer', error, {
+        bucket: this.bucketName,
+        key: input.key,
+        fileName: input.fileName,
+        mimeType: input.mimeType,
+        sizeBytes: input.buffer.length,
+      });
+
+      throw error;
+    }
   }
 
   async deleteObject(key: string): Promise<void> {
-    await this.client.send(
-      new DeleteObjectCommand({
-        Bucket: this.bucketName,
-        Key: key,
-      }),
-    );
+    try {
+      await this.client.send(
+        new DeleteObjectCommand({
+          Bucket: this.bucketName,
+          Key: key,
+        }),
+      );
+    } catch (error) {
+      this.logAwsError('deleteObject', error, {
+        bucket: this.bucketName,
+        key,
+      });
+
+      throw error;
+    }
   }
 
   async createSignedGetUrl(input: {
@@ -99,7 +121,9 @@ export class R2StorageService {
       Bucket: this.bucketName,
       Key: input.key,
       ResponseContentType: input.mimeType,
-      ResponseContentDisposition: `${input.disposition}; filename="${this.escapeHeaderValue(input.fileName)}"`,
+      ResponseContentDisposition: contentDisposition(input.fileName, {
+        type: input.disposition,
+      }),
     });
 
     return getSignedUrl(this.client, command, {
@@ -123,7 +147,37 @@ export class R2StorageService {
     return `https://${this.bucketName}.${this.accountId}.r2.cloudflarestorage.com/${normalizedKey}`;
   }
 
-  private escapeHeaderValue(value: string): string {
-    return value.replace(/"/g, '\\"');
+  private logAwsError(
+    operation: string,
+    error: unknown,
+    context: Record<string, string | number | boolean | null>,
+  ): void {
+    if (error instanceof Error) {
+      const awsError = error as Error & {
+        $metadata?: Record<string, unknown>;
+        Code?: string;
+        code?: string;
+        requestId?: string;
+        $response?: { statusCode?: number };
+      };
+
+      const logContext = {
+        ...context,
+        awsCode: awsError.Code ?? awsError.code ?? null,
+        requestId: awsError.requestId ?? null,
+        statusCode: awsError.$response?.statusCode ?? awsError.$metadata?.httpStatusCode ?? null,
+        metadata: awsError.$metadata ?? null,
+      };
+
+      this.logger.error(
+        `${operation} failed: ${error.name}: ${error.message} | context=${JSON.stringify(logContext)}`,
+        error.stack,
+      );
+      return;
+    }
+
+    this.logger.error(
+      `${operation} failed with non-error value | context=${JSON.stringify({ context, error: String(error) })}`,
+    );
   }
 }

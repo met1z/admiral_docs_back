@@ -3,12 +3,14 @@ import {
   ConflictException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Brackets, In, Repository, SelectQueryBuilder, WhereExpressionBuilder } from 'typeorm';
 import type { Express } from 'express';
+import sanitizeFilename from 'sanitize-filename';
 
 import { UsersService } from '../users/users.service';
 import { UserEntity } from '../users/user.entity';
@@ -60,6 +62,8 @@ type DocumentListRawRow = {
 
 @Injectable()
 export class DocumentsService {
+  private readonly logger = new Logger(DocumentsService.name);
+
   constructor(
     @InjectRepository(DocumentTypeEntity)
     private readonly documentTypesRepository: Repository<DocumentTypeEntity>,
@@ -176,24 +180,35 @@ export class DocumentsService {
       throw new BadRequestException('Файл не передано');
     }
 
-    this.assertSupportedUploadFile(file.mimetype, file.size, file.originalname);
+    const originalFileName = this.normalizeUploadedFileName(file.originalname);
 
-    const safeName = this.sanitizeFileName(file.originalname);
+    this.assertSupportedUploadFile(file.mimetype, file.size, originalFileName);
+
+    const safeName = this.sanitizeFileName(originalFileName);
     const storageKey = `documents/tmp/${actor.userId}/${Date.now()}-${randomUUID()}-${safeName}`;
-    const uploaded = await this.r2StorageService.uploadBuffer({
-      key: storageKey,
-      buffer: file.buffer,
-      mimeType: file.mimetype,
-      fileName: file.originalname,
-    });
+    try {
+      const uploaded = await this.r2StorageService.uploadBuffer({
+        key: storageKey,
+        buffer: file.buffer,
+        mimeType: file.mimetype,
+        fileName: originalFileName,
+      });
 
-    return {
-      mimeType: file.mimetype,
-      storageKey: uploaded.key,
-      url: uploaded.publicUrl,
-      originalFileName: file.originalname,
-      sizeBytes: file.size,
-    };
+      return {
+        mimeType: file.mimetype,
+        storageKey: uploaded.key,
+        url: uploaded.publicUrl,
+        originalFileName,
+        sizeBytes: file.size,
+      };
+    } catch (error) {
+      this.logger.error(
+        `Failed to upload document file for user ${actor.userId}: originalName="${originalFileName}", rawOriginalName="${file.originalname}", mimeType="${file.mimetype}", sizeBytes=${file.size}, storageKey="${storageKey}"`,
+        error instanceof Error ? error.stack : undefined,
+      );
+
+      throw error;
+    }
   }
 
   async list(query: DocumentQueryDto, currentUser: AuthenticatedUser): Promise<{
@@ -1165,10 +1180,29 @@ export class DocumentsService {
   }
 
   private sanitizeFileName(fileName: string): string {
-    return fileName
-      .trim()
-      .replace(/[^\w.\-]+/g, '_')
-      .replace(/_+/g, '_')
-      .slice(0, 120);
+    return sanitizeFilename(fileName).trim().slice(0, 120) || 'file';
+  }
+
+  private normalizeUploadedFileName(fileName: string): string {
+    const trimmed = fileName.trim();
+    const decodedFromLatin1 = Buffer.from(trimmed, 'latin1').toString('utf8');
+
+    if (decodedFromLatin1 === trimmed) {
+      return trimmed;
+    }
+
+    if (this.getFileNameTextScore(decodedFromLatin1) > this.getFileNameTextScore(trimmed)) {
+      return decodedFromLatin1;
+    }
+
+    return trimmed;
+  }
+
+  private getFileNameTextScore(value: string): number {
+    const cyrillicMatches = value.match(/[\u0400-\u04FF]/g)?.length ?? 0;
+    const asciiLetters = value.match(/[A-Za-z]/g)?.length ?? 0;
+    const suspiciousMarkers = value.match(/[ÃÂÐÑâ€™�]/g)?.length ?? 0;
+
+    return cyrillicMatches * 3 + asciiLetters - suspiciousMarkers * 4;
   }
 }
