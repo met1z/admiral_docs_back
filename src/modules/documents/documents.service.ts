@@ -545,7 +545,7 @@ export class DocumentsService {
             mimeType: file.mimeType,
             disposition: 'attachment',
           })
-        : file.url,
+      : file.url,
     };
   }
 
@@ -1162,7 +1162,6 @@ export class DocumentsService {
 
     const allowedMimeTypes = new Set([
       'application/pdf',
-      'application/msword',
       'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
       'image/jpeg',
       'image/png',
@@ -1171,11 +1170,11 @@ export class DocumentsService {
       'image/svg+xml',
     ]);
 
-    const allowedExtensions = new Set(['pdf', 'doc', 'docx', 'jpg', 'jpeg', 'png', 'gif', 'webp', 'svg']);
+    const allowedExtensions = new Set(['pdf', 'docx', 'jpg', 'jpeg', 'png', 'gif', 'webp', 'svg']);
     const extension = originalFileName.split('.').pop()?.toLowerCase() ?? '';
 
     if (!allowedMimeTypes.has(mimeType) && !allowedExtensions.has(extension)) {
-      throw new BadRequestException('Дозволені тільки PDF, Word та зображення');
+      throw new BadRequestException('Дозволені тільки PDF, DOCX та зображення');
     }
   }
 
