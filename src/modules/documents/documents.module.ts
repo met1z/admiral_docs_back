@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 
 import { UsersModule } from '../users/users.module';
+import { DocumentCommentEntity } from './entities/document-comment.entity';
 import { DocumentFileEntity } from './entities/document-file.entity';
 import { DocumentHistoryEventEntity } from './entities/document-history-event.entity';
 import { DocumentParticipantEntity } from './entities/document-participant.entity';
@@ -17,6 +18,7 @@ import { R2StorageService } from './services/r2-storage.service';
     TypeOrmModule.forFeature([
       DocumentTypeEntity,
       DocumentEntity,
+      DocumentCommentEntity,
       DocumentFileEntity,
       DocumentParticipantEntity,
       DocumentHistoryEventEntity,

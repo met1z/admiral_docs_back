@@ -1,4 +1,4 @@
-import { ArrayMinSize, IsArray, IsInt, IsOptional, IsString, Min } from 'class-validator';
+import { ArrayMinSize, IsArray, IsInt, IsOptional, IsString, Min, MinLength } from 'class-validator';
 
 export class SendAdditionalApprovalDto {
   @IsArray()
@@ -11,8 +11,7 @@ export class SendAdditionalApprovalDto {
   @IsString()
   message?: string;
 
-  @IsOptional()
   @IsString()
-  reason?: string;
+  @MinLength(3)
+  reason!: string;
 }
-

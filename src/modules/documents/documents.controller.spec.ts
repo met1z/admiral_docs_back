@@ -4,6 +4,7 @@ import { AuthenticatedUser } from '../../common/types/authenticated-user.type';
 import { Role } from '../users/user-role.enum';
 import { DocumentParticipantType } from './enums/document-participant-type.enum';
 import { DocumentFileDto } from './dto/document-file.dto';
+import { AddDocumentCommentDto } from './dto/add-document-comment.dto';
 
 describe('DocumentsController', () => {
   let controller: DocumentsController;
@@ -16,6 +17,8 @@ describe('DocumentsController', () => {
     getFileDownloadUrl: jest.Mock;
     updateName: jest.Mock;
     updateFile: jest.Mock;
+    addComment: jest.Mock;
+    refundDocument: jest.Mock;
     deleteDocument: jest.Mock;
     signParticipant: jest.Mock;
     rejectParticipant: jest.Mock;
@@ -39,6 +42,8 @@ describe('DocumentsController', () => {
       getFileDownloadUrl: jest.fn(),
       updateName: jest.fn(),
       updateFile: jest.fn(),
+      addComment: jest.fn(),
+      refundDocument: jest.fn(),
       deleteDocument: jest.fn(),
       signParticipant: jest.fn(),
       rejectParticipant: jest.fn(),
@@ -50,9 +55,11 @@ describe('DocumentsController', () => {
   });
 
   it('delegates list requests to the service', async () => {
-    await controller.list({ page: 1 } as DocumentQueryDto, user);
+    const query = { page: 1, requiresAction: true } as DocumentQueryDto;
 
-    expect(documentsService.list).toHaveBeenCalledWith({ page: 1 }, user);
+    await controller.list(query, user);
+
+    expect(documentsService.list).toHaveBeenCalledWith(query, user);
   });
 
   it('delegates creation to the service', async () => {
@@ -101,10 +108,20 @@ describe('DocumentsController', () => {
     expect(documentsService.sendForAdditionalApproval).toHaveBeenCalledWith(10, 20, { userIds: [2] }, user);
   });
 
-  it('delegates resubmit and delete to the service', async () => {
+  it('delegates comments to the service', async () => {
+    const dto = { comment: 'Looks good to me' };
+
+    await controller.addComment(10, dto as AddDocumentCommentDto, user);
+
+    expect(documentsService.addComment).toHaveBeenCalledWith(10, dto, user);
+  });
+
+  it('delegates refund, resubmit and delete to the service', async () => {
+    await controller.refund(10, user);
     await controller.resubmit(10, user);
     await controller.delete(10, user);
 
+    expect(documentsService.refundDocument).toHaveBeenCalledWith(10, user);
     expect(documentsService.resubmit).toHaveBeenCalledWith(10, user);
     expect(documentsService.deleteDocument).toHaveBeenCalledWith(10, user);
   });

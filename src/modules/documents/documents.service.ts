@@ -15,12 +15,14 @@ import sanitizeFilename from 'sanitize-filename';
 import { UsersService } from '../users/users.service';
 import { UserEntity } from '../users/user.entity';
 import { AuthenticatedUser } from '../../common/types/authenticated-user.type';
+import { DocumentCommentEntity } from './entities/document-comment.entity';
 import { DocumentFileEntity } from './entities/document-file.entity';
 import { DocumentHistoryEventEntity } from './entities/document-history-event.entity';
 import { DocumentParticipantEntity } from './entities/document-participant.entity';
 import { DocumentTypeEntity } from './entities/document-type.entity';
 import { DocumentEntity } from './entities/document.entity';
 import { CreateDocumentDto } from './dto/create-document.dto';
+import { AddDocumentCommentDto } from './dto/add-document-comment.dto';
 import { CreateDocumentParticipantDto } from './dto/create-document-participant.dto';
 import { DocumentQueryDto, DocumentSortBy } from './dto/document-query.dto';
 import { RejectParticipantDto } from './dto/reject-participant.dto';
@@ -31,10 +33,7 @@ import { DocumentHistoryEventType } from './enums/document-history-event-type.en
 import { DocumentParticipantStatus } from './enums/document-participant-status.enum';
 import { DocumentParticipantType } from './enums/document-participant-type.enum';
 import { DocumentStatus } from './enums/document-status.enum';
-import {
-  DocumentDetailView,
-  DocumentListItem,
-} from './types/document-view.types';
+import { DocumentDetailView, DocumentListItem } from './types/document-view.types';
 import { R2StorageService } from './services/r2-storage.service';
 
 type DocumentListRawRow = {
@@ -47,6 +46,8 @@ type DocumentListRawRow = {
   document_last_rejection_reason: string | null;
   document_last_rejected_by_user_id: string | number | null;
   document_last_rejected_at: string | Date | null;
+  document_refunded_by_user_id: string | number | null;
+  document_refunded_at: string | Date | null;
   document_completed_at: string | Date | null;
   document_created_at: string | Date;
   document_updated_at: string | Date;
@@ -69,6 +70,8 @@ export class DocumentsService {
     private readonly documentTypesRepository: Repository<DocumentTypeEntity>,
     @InjectRepository(DocumentEntity)
     private readonly documentsRepository: Repository<DocumentEntity>,
+    @InjectRepository(DocumentCommentEntity)
+    private readonly documentCommentsRepository: Repository<DocumentCommentEntity>,
     @InjectRepository(DocumentFileEntity)
     private readonly documentFilesRepository: Repository<DocumentFileEntity>,
     @InjectRepository(DocumentParticipantEntity)
@@ -109,6 +112,8 @@ export class DocumentsService {
         lastRejectionReason: null,
         lastRejectedByUserId: null,
         lastRejectedAt: null,
+        refundedByUserId: null,
+        refundedAt: null,
         completedAt: null,
       }),
     );
@@ -125,7 +130,7 @@ export class DocumentsService {
       }),
     );
 
-    const participants = dto.participants.map((participant) =>
+    const participants = dto.participants.map(participant =>
       this.documentParticipantsRepository.create({
         documentId: document.id,
         userId: participant.userId,
@@ -211,7 +216,10 @@ export class DocumentsService {
     }
   }
 
-  async list(query: DocumentQueryDto, currentUser: AuthenticatedUser): Promise<{
+  async list(
+    query: DocumentQueryDto,
+    currentUser: AuthenticatedUser,
+  ): Promise<{
     items: DocumentListItem[];
     total: number;
     page: number;
@@ -244,7 +252,11 @@ export class DocumentsService {
           LIMIT 1
         )`,
       )
-      .leftJoin(UserEntity, 'current_action_user', 'current_action_user.id = current_action_participant.user_id');
+      .leftJoin(
+        UserEntity,
+        'current_action_user',
+        'current_action_user.id = current_action_participant.user_id',
+      );
 
     this.applyDocumentAccessFilter(qb, currentUser.userId);
     qb.setParameter('pendingStatus', DocumentParticipantStatus.PENDING);
@@ -259,7 +271,9 @@ export class DocumentsService {
     }
 
     if (query.statusGroup === 'completed') {
-      qb.andWhere('document.status = :completedStatus', { completedStatus: DocumentStatus.COMPLETED });
+      qb.andWhere('document.status = :completedStatus', {
+        completedStatus: DocumentStatus.COMPLETED,
+      });
     } else if (query.statusGroup === 'active') {
       qb.andWhere('document.status IN (:...activeStatuses)', {
         activeStatuses: [DocumentStatus.IN_PROGRESS, DocumentStatus.REJECTED],
@@ -272,6 +286,22 @@ export class DocumentsService {
       } else {
         qb.andWhere('document.submission_round > 1');
       }
+    }
+
+    if (query.requiresAction) {
+      qb.andWhere(
+        `(
+          current_action_user.id = :currentUserId
+          OR (
+            document.status IN (:...requiresActionStatuses)
+            AND document.created_by_user_id = :currentUserId
+          )
+        )`,
+        {
+          currentUserId: currentUser.userId,
+          requiresActionStatuses: [DocumentStatus.REJECTED, DocumentStatus.REFUNDED],
+        },
+      );
     }
 
     if (query.search) {
@@ -326,6 +356,8 @@ export class DocumentsService {
         'document.last_rejection_reason AS document_last_rejection_reason',
         'document.last_rejected_by_user_id AS document_last_rejected_by_user_id',
         'document.last_rejected_at AS document_last_rejected_at',
+        'document.refunded_by_user_id AS document_refunded_by_user_id',
+        'document.refunded_at AS document_refunded_at',
         'document.completed_at AS document_completed_at',
         'document.created_at AS document_created_at',
         'document.updated_at AS document_updated_at',
@@ -341,7 +373,7 @@ export class DocumentsService {
       .getRawMany()) as DocumentListRawRow[];
 
     return {
-      items: rawRows.map((row) => this.mapDocumentListItem(row, currentUser.userId)),
+      items: rawRows.map(row => this.mapDocumentListItem(row, currentUser.userId)),
       total,
       page,
       limit,
@@ -355,9 +387,16 @@ export class DocumentsService {
       where: { id: document.typeId },
     });
 
-    const [currentFile, participants, history] = await Promise.all([
+    const [currentFile, comments, participants, history] = await Promise.all([
       this.documentFilesRepository.findOne({
         where: { documentId: document.id, isCurrent: true },
+      }),
+      this.documentCommentsRepository.find({
+        where: { documentId: document.id },
+        order: {
+          createdAt: 'ASC',
+          id: 'ASC',
+        },
       }),
       this.documentParticipantsRepository.find({
         where: { documentId: document.id },
@@ -381,6 +420,7 @@ export class DocumentsService {
       documentType?.name ?? null,
       currentFile,
       participants,
+      comments,
       history,
       currentUserId,
     );
@@ -463,6 +503,89 @@ export class DocumentsService {
     return this.getDetail(document.id, actor.userId);
   }
 
+  async addComment(
+    documentId: number,
+    dto: AddDocumentCommentDto,
+    actor: AuthenticatedUser,
+  ): Promise<DocumentDetailView> {
+    const document = await this.getAccessibleDocumentOrThrow(documentId, actor.userId);
+    const comment = dto.comment.trim();
+
+    if (!comment) {
+      throw new BadRequestException('Коментар не може бути порожнім');
+    }
+
+    const savedComment = await this.documentCommentsRepository.save(
+      this.documentCommentsRepository.create({
+        documentId: document.id,
+        actorUserId: actor.userId,
+        message: comment,
+      }),
+    );
+
+    await this.createHistoryEvent({
+      documentId: document.id,
+      actorUserId: actor.userId,
+      participantId: null,
+      targetUserId: null,
+      eventType: DocumentHistoryEventType.COMMENT_ADDED,
+      message: comment,
+      reason: null,
+      metadata: {
+        documentCommentId: savedComment.id,
+      },
+    });
+
+    return this.getDetail(document.id, actor.userId);
+  }
+
+  async refundDocument(documentId: number, actor: AuthenticatedUser): Promise<DocumentDetailView> {
+    const document = await this.getAccessibleDocumentOrThrow(documentId, actor.userId);
+
+    if (document.createdByUserId !== actor.userId) {
+      throw new ForbiddenException('Тільки ініціатор може відгукнути документ');
+    }
+
+    if (document.status === DocumentStatus.REFUNDED) {
+      return this.getDetail(document.id, actor.userId);
+    }
+
+    if (document.status !== DocumentStatus.IN_PROGRESS) {
+      throw new BadRequestException('Відгукнути можна лише документ у роботі');
+    }
+
+    const participants = await this.getDocumentParticipants(document.id);
+    if (
+      participants.some(
+        participant => participant.signedStatus !== DocumentParticipantStatus.PENDING,
+      )
+    ) {
+      throw new BadRequestException('Відгукнути можна лише документ без підписів');
+    }
+
+    document.status = DocumentStatus.REFUNDED;
+    document.refundedByUserId = actor.userId;
+    document.refundedAt = new Date();
+    document.lastRejectionReason = null;
+    document.lastRejectedByUserId = null;
+    document.lastRejectedAt = null;
+    document.completedAt = null;
+    await this.documentsRepository.save(document);
+
+    await this.createHistoryEvent({
+      documentId: document.id,
+      actorUserId: actor.userId,
+      participantId: null,
+      targetUserId: null,
+      eventType: DocumentHistoryEventType.REFUNDED,
+      message: 'Document refunded by initiator',
+      reason: null,
+      metadata: null,
+    });
+
+    return this.getDetail(document.id, actor.userId);
+  }
+
   async deleteDocument(documentId: number, actor: AuthenticatedUser): Promise<{ deleted: true }> {
     const document = await this.getAccessibleDocumentOrThrow(documentId, actor.userId);
 
@@ -470,8 +593,11 @@ export class DocumentsService {
       throw new ForbiddenException('Тільки ініціатор може видалити документ');
     }
 
-    if (document.status === DocumentStatus.COMPLETED) {
-      throw new BadRequestException('Завершений документ видаляти не можна');
+    if (
+      document.status !== DocumentStatus.REFUNDED &&
+      document.status !== DocumentStatus.REJECTED
+    ) {
+      throw new BadRequestException('Видаляти можна лише відхилений або відгукнутий документ');
     }
 
     await this.createHistoryEvent({
@@ -499,10 +625,7 @@ export class DocumentsService {
     return { deleted: true };
   }
 
-  async getFileViewUrl(
-    documentId: number,
-    actor: AuthenticatedUser,
-  ): Promise<{ url: string }> {
+  async getFileViewUrl(documentId: number, actor: AuthenticatedUser): Promise<{ url: string }> {
     const document = await this.getAccessibleDocumentOrThrow(documentId, actor.userId);
     const file = await this.documentFilesRepository.findOne({
       where: { documentId: document.id, isCurrent: true },
@@ -524,10 +647,7 @@ export class DocumentsService {
     };
   }
 
-  async getFileDownloadUrl(
-    documentId: number,
-    actor: AuthenticatedUser,
-  ): Promise<{ url: string }> {
+  async getFileDownloadUrl(documentId: number, actor: AuthenticatedUser): Promise<{ url: string }> {
     const document = await this.getAccessibleDocumentOrThrow(documentId, actor.userId);
     const file = await this.documentFilesRepository.findOne({
       where: { documentId: document.id, isCurrent: true },
@@ -545,7 +665,7 @@ export class DocumentsService {
             mimeType: file.mimeType,
             disposition: 'attachment',
           })
-      : file.url,
+        : file.url,
     };
   }
 
@@ -592,10 +712,14 @@ export class DocumentsService {
     }
 
     const remainingParticipants = participants.filter(
-      (participant) => participant.id !== currentParticipant.id,
+      participant => participant.id !== currentParticipant.id,
     );
 
-    if (remainingParticipants.every((participant) => participant.signedStatus === DocumentParticipantStatus.COMPLETED)) {
+    if (
+      remainingParticipants.every(
+        participant => participant.signedStatus === DocumentParticipantStatus.COMPLETED,
+      )
+    ) {
       document.status = DocumentStatus.COMPLETED;
       document.completedAt = new Date();
       await this.documentsRepository.save(document);
@@ -634,20 +758,19 @@ export class DocumentsService {
     }
 
     const uniqueUserIds = [...new Set(dto.userIds)];
-    await Promise.all(uniqueUserIds.map((userId) => this.usersService.findById(userId)));
+    await Promise.all(uniqueUserIds.map(userId => this.usersService.findById(userId)));
 
     for (const userId of uniqueUserIds) {
-      const existingParticipant = participants.find(
-        (participant) =>
-          participant.userId === userId && participant.participantType === DocumentParticipantType.ADDITIONAL_APPROVER,
-      );
+      const existingParticipant = participants.find(participant => participant.userId === userId);
 
       if (existingParticipant) {
-        throw new ConflictException(`Користувач ${userId} вже доданий як додатковий погоджувач`);
+        throw new ConflictException(
+          `Користувач ${userId} вже є серед підписантів або погоджувачів`,
+        );
       }
     }
 
-    const newParticipants = uniqueUserIds.map((userId) =>
+    const newParticipants = uniqueUserIds.map(userId =>
       this.documentParticipantsRepository.create({
         documentId: document.id,
         userId,
@@ -701,7 +824,7 @@ export class DocumentsService {
     await this.documentParticipantsRepository.save(currentParticipant);
 
     const participantsToRemove = participants.filter(
-      (participant) =>
+      participant =>
         participant.participantType === DocumentParticipantType.ADDITIONAL_APPROVER &&
         !participant.isPreservedAfterRejection &&
         participant.id !== currentParticipant.id,
@@ -712,12 +835,13 @@ export class DocumentsService {
         .createQueryBuilder()
         .delete()
         .from(DocumentParticipantEntity)
-        .where('id IN (:...ids)', { ids: participantsToRemove.map((participant) => participant.id) })
+        .where('id IN (:...ids)', { ids: participantsToRemove.map(participant => participant.id) })
         .execute();
     }
 
     const participantsToReset = participants.filter(
-      (participant) => participant.id !== currentParticipant.id && !participantsToRemove.includes(participant),
+      participant =>
+        participant.id !== currentParticipant.id && !participantsToRemove.includes(participant),
     );
 
     for (const participant of participantsToReset) {
@@ -749,6 +873,14 @@ export class DocumentsService {
       },
     });
 
+    await this.documentCommentsRepository.save(
+      this.documentCommentsRepository.create({
+        documentId: document.id,
+        actorUserId: actor.userId,
+        message: `Повернуто: "${dto.reason.trim()}"`,
+      }),
+    );
+
     await this.createHistoryEvent({
       documentId: document.id,
       actorUserId: actor.userId,
@@ -770,8 +902,13 @@ export class DocumentsService {
       throw new ForbiddenException('Тільки ініціатор може повторно відправити документ');
     }
 
-    if (document.status !== DocumentStatus.REJECTED) {
-      throw new BadRequestException('Повторно можна відправити тільки відхилений документ');
+    if (
+      document.status !== DocumentStatus.REJECTED &&
+      document.status !== DocumentStatus.REFUNDED
+    ) {
+      throw new BadRequestException(
+        'Повторно можна відправити тільки відхилений або відгукнутий документ',
+      );
     }
 
     const participants = await this.getDocumentParticipants(document.id);
@@ -782,6 +919,11 @@ export class DocumentsService {
 
     document.status = DocumentStatus.IN_PROGRESS;
     document.submissionRound += 1;
+    document.lastRejectionReason = null;
+    document.lastRejectedByUserId = null;
+    document.lastRejectedAt = null;
+    document.refundedByUserId = null;
+    document.refundedAt = null;
     await this.documentsRepository.save(document);
 
     await this.createHistoryEvent({
@@ -800,7 +942,10 @@ export class DocumentsService {
     return this.getDetail(document.id, actor.userId);
   }
 
-  private async getEditableDocument(documentId: number, actorUserId: number): Promise<DocumentEntity> {
+  private async getEditableDocument(
+    documentId: number,
+    actorUserId: number,
+  ): Promise<DocumentEntity> {
     const document = await this.getAccessibleDocumentOrThrow(documentId, actorUserId);
 
     if (document.createdByUserId !== actorUserId) {
@@ -811,14 +956,20 @@ export class DocumentsService {
       throw new BadRequestException('Завершений документ редагувати не можна');
     }
 
-    if (document.status !== DocumentStatus.REJECTED) {
-      throw new BadRequestException('Редагування доступне тільки після відхилення');
+    if (
+      document.status !== DocumentStatus.REJECTED &&
+      document.status !== DocumentStatus.REFUNDED
+    ) {
+      throw new BadRequestException('Редагування доступне тільки після відхилення або відгукнення');
     }
 
     return document;
   }
 
-  private async getSignableDocument(documentId: number, actorUserId: number): Promise<DocumentEntity> {
+  private async getSignableDocument(
+    documentId: number,
+    actorUserId: number,
+  ): Promise<DocumentEntity> {
     const document = await this.getAccessibleDocumentOrThrow(documentId, actorUserId);
 
     if (document.status !== DocumentStatus.IN_PROGRESS) {
@@ -850,12 +1001,15 @@ export class DocumentsService {
     });
   }
 
-  private getCurrentActionParticipant(participants: DocumentParticipantEntity[]): DocumentParticipantEntity | null {
+  private getCurrentActionParticipant(
+    participants: DocumentParticipantEntity[],
+  ): DocumentParticipantEntity | null {
     const sortedParticipants = this.sortParticipants(participants);
-    return sortedParticipants.find(
-      (participant) => participant.signedStatus === DocumentParticipantStatus.PENDING,
-    )
-      ?? null;
+    return (
+      sortedParticipants.find(
+        participant => participant.signedStatus === DocumentParticipantStatus.PENDING,
+      ) ?? null
+    );
   }
 
   private sortParticipants(participants: DocumentParticipantEntity[]): DocumentParticipantEntity[] {
@@ -900,7 +1054,9 @@ export class DocumentsService {
   }
 
   private mapDocumentListItem(row: DocumentListRawRow, currentUserId: number): DocumentListItem {
-    const currentActionUserId = row.current_action_user_id ? Number(row.current_action_user_id) : null;
+    const currentActionUserId = row.current_action_user_id
+      ? Number(row.current_action_user_id)
+      : null;
     const currentActionFirstName = String(row.current_action_first_name ?? '');
     const currentActionLastName = String(row.current_action_last_name ?? '');
     const currentActionEmail = String(row.current_action_email ?? '');
@@ -914,26 +1070,43 @@ export class DocumentsService {
       typeId: Number(row.document_type_id),
       typeName: row.document_type_name ? String(row.document_type_name) : null,
       createdByUserId: Number(row.document_created_by_user_id),
-      createdByFullName: [creatorFirstName, creatorLastName].filter(Boolean).join(' ') || creatorEmail,
+      createdByFullName:
+        [creatorFirstName, creatorLastName].filter(Boolean).join(' ') || creatorEmail,
       name: String(row.document_name),
       status: row.document_status as DocumentStatus,
       revisionType: Number(row.document_submission_round) > 1 ? 'repeat' : 'new',
       submissionRound: Number(row.document_submission_round),
-      lastRejectionReason: row.document_last_rejection_reason ? String(row.document_last_rejection_reason) : null,
+      lastRejectionReason: row.document_last_rejection_reason
+        ? String(row.document_last_rejection_reason)
+        : null,
       lastRejectedByUserId: row.document_last_rejected_by_user_id
         ? Number(row.document_last_rejected_by_user_id)
         : null,
-      lastRejectedAt: row.document_last_rejected_at ? new Date(String(row.document_last_rejected_at)) : null,
+      lastRejectedAt: row.document_last_rejected_at
+        ? new Date(String(row.document_last_rejected_at))
+        : null,
+      refundedByUserId: row.document_refunded_by_user_id
+        ? Number(row.document_refunded_by_user_id)
+        : null,
+      refundedAt: row.document_refunded_at ? new Date(String(row.document_refunded_at)) : null,
       completedAt: row.document_completed_at ? new Date(String(row.document_completed_at)) : null,
       createdAt: new Date(String(row.document_created_at)),
       updatedAt: new Date(String(row.document_updated_at)),
-      requiresAction: currentActionUserId === currentUserId,
+      requiresAction:
+        currentActionUserId === currentUserId ||
+        ((row.document_status === DocumentStatus.REJECTED ||
+          row.document_status === DocumentStatus.REFUNDED) &&
+          Number(row.document_created_by_user_id) === currentUserId),
       myParticipantId: null,
       myParticipantStatus: null,
       myParticipantType: null,
-      currentActionFullName: currentActionUserId
-        ? [currentActionFirstName, currentActionLastName].filter(Boolean).join(' ') || currentActionEmail
-        : null,
+      currentActionFullName:
+        row.document_status !== DocumentStatus.REFUNDED &&
+        row.document_status !== DocumentStatus.REJECTED &&
+        currentActionUserId
+          ? [currentActionFirstName, currentActionLastName].filter(Boolean).join(' ') ||
+            currentActionEmail
+          : null,
     };
   }
 
@@ -942,37 +1115,48 @@ export class DocumentsService {
     typeName: string | null,
     currentFile: DocumentFileEntity | null,
     participants: DocumentParticipantEntity[],
+    comments: DocumentCommentEntity[],
     history: DocumentHistoryEventEntity[],
     currentUserId: number,
   ): Promise<DocumentDetailView> {
     const sortedParticipants = this.sortParticipants(participants);
-    const currentActionParticipant = this.getCurrentActionParticipant(sortedParticipants);
-    const myParticipant = sortedParticipants.find((participant) => participant.userId === currentUserId) ?? null;
+    const currentActionParticipant =
+      document.status === DocumentStatus.REFUNDED
+        ? null
+        : this.getCurrentActionParticipant(sortedParticipants);
+    const myParticipant =
+      sortedParticipants.find(participant => participant.userId === currentUserId) ?? null;
 
     const userIds = new Set<number>([
       document.createdByUserId,
       ...(document.lastRejectedByUserId ? [document.lastRejectedByUserId] : []),
-      ...sortedParticipants.map((participant) => participant.userId),
-      ...history.map((event) => event.actorUserId),
-      ...history.flatMap((event) => [event.participantId, event.targetUserId]).filter((value): value is number => value !== null),
+      ...sortedParticipants.map(participant => participant.userId),
+      ...comments.map(comment => comment.actorUserId),
+      ...history.map(event => event.actorUserId),
+      ...history
+        .flatMap(event => [event.participantId, event.targetUserId])
+        .filter((value): value is number => value !== null),
     ]);
 
     const users = await this.usersService.findByIds(Array.from(userIds));
-    const userMap = new Map(users.map((user) => [user.id, user]));
+    const userMap = new Map(users.map(user => [user.id, user]));
     const creator = userMap.get(document.createdByUserId);
 
     if (!creator) {
       throw new NotFoundException('Користувача не знайдено');
     }
 
-    const currentActionUser = currentActionParticipant ? userMap.get(currentActionParticipant.userId) ?? null : null;
+    const currentActionUser = currentActionParticipant
+      ? (userMap.get(currentActionParticipant.userId) ?? null)
+      : null;
 
     return {
       id: document.id,
       typeId: document.typeId,
       typeName,
       createdByUserId: document.createdByUserId,
-      createdByFullName: [creator.firstName, creator.lastName].filter(Boolean).join(' ') || creator.email,
+      createdByFullName:
+        [creator.firstName, creator.lastName].filter(Boolean).join(' ') || creator.email,
       name: document.name,
       status: document.status,
       revisionType: document.submissionRound > 1 ? 'repeat' : 'new',
@@ -980,6 +1164,8 @@ export class DocumentsService {
       lastRejectionReason: document.lastRejectionReason,
       lastRejectedByUserId: document.lastRejectedByUserId,
       lastRejectedAt: document.lastRejectedAt,
+      refundedByUserId: document.refundedByUserId,
+      refundedAt: document.refundedAt,
       completedAt: document.completedAt,
       createdAt: document.createdAt,
       updatedAt: document.updatedAt,
@@ -1010,7 +1196,7 @@ export class DocumentsService {
               : currentFile.url,
           }
         : null,
-      participants: sortedParticipants.map((participant) => ({
+      participants: sortedParticipants.map(participant => ({
         id: participant.id,
         userId: participant.userId,
         userEmail: userMap.get(participant.userId)?.email ?? null,
@@ -1025,11 +1211,26 @@ export class DocumentsService {
         updatedAt: participant.updatedAt,
         isCurrentAction: currentActionParticipant?.id === participant.id,
       })),
-      history: history.map((event) => ({
+      comments: comments.map(comment => ({
+        id: comment.id,
+        actorUserId: comment.actorUserId,
+        actorFullName: (() => {
+          const actor = userMap.get(comment.actorUserId);
+
+          return actor
+            ? [actor.firstName, actor.lastName].filter(Boolean).join(' ') || actor.email
+            : '—';
+        })(),
+        message: comment.message,
+        createdAt: comment.createdAt,
+      })),
+      history: history.map(event => ({
         actorFullName: (() => {
           const actor = userMap.get(event.actorUserId);
 
-          return actor ? [actor.firstName, actor.lastName].filter(Boolean).join(' ') || actor.email : '—';
+          return actor
+            ? [actor.firstName, actor.lastName].filter(Boolean).join(' ') || actor.email
+            : '—';
         })(),
         id: event.id,
         actorUserId: event.actorUserId,
@@ -1039,7 +1240,9 @@ export class DocumentsService {
           ? (() => {
               const target = userMap.get(event.targetUserId);
 
-              return target ? [target.firstName, target.lastName].filter(Boolean).join(' ') || target.email : null;
+              return target
+                ? [target.firstName, target.lastName].filter(Boolean).join(' ') || target.email
+                : null;
             })()
           : null,
         eventType: event.eventType,
@@ -1048,12 +1251,15 @@ export class DocumentsService {
         metadata: event.metadata,
         createdAt: event.createdAt,
       })),
-      requiresAction: Boolean(currentActionParticipant && currentActionParticipant.userId === currentUserId),
+      requiresAction: Boolean(
+        currentActionParticipant && currentActionParticipant.userId === currentUserId,
+      ),
       myParticipantId: myParticipant?.id ?? null,
       myParticipantStatus: myParticipant?.signedStatus ?? null,
       myParticipantType: myParticipant?.participantType ?? null,
       currentActionFullName: currentActionUser
-        ? [currentActionUser.firstName, currentActionUser.lastName].filter(Boolean).join(' ') || currentActionUser.email
+        ? [currentActionUser.firstName, currentActionUser.lastName].filter(Boolean).join(' ') ||
+          currentActionUser.email
         : null,
     };
   }
@@ -1082,10 +1288,7 @@ export class DocumentsService {
     );
   }
 
-  private applyDocumentAccessFilter(
-    qb: SelectQueryBuilder<DocumentEntity>,
-    userId: number,
-  ): void {
+  private applyDocumentAccessFilter(qb: SelectQueryBuilder<DocumentEntity>, userId: number): void {
     qb.andWhere(
       new Brackets((accessQb: WhereExpressionBuilder) => {
         accessQb
@@ -1112,17 +1315,15 @@ export class DocumentsService {
       .where('document.id = :documentId', { documentId })
       .andWhere(
         new Brackets((accessQb: WhereExpressionBuilder) => {
-          accessQb
-            .where('document.created_by_user_id = :userId', { userId })
-            .orWhere(
-              `EXISTS (
+          accessQb.where('document.created_by_user_id = :userId', { userId }).orWhere(
+            `EXISTS (
                 SELECT 1
                 FROM document_participant dp
                 WHERE dp.document_id = document.id
                   AND dp.user_id = :userId
               )`,
-              { userId },
-            );
+            { userId },
+          );
         }),
       )
       .getOne();
@@ -1135,10 +1336,10 @@ export class DocumentsService {
   }
 
   private assertSequentialParticipants(participants: CreateDocumentParticipantDto[]): void {
-    const orders = participants.map((participant) => participant.order);
+    const orders = participants.map(participant => participant.order);
     const sortedOrders = [...orders].sort((left, right) => left - right);
 
-    const uniqueUserIds = new Set(participants.map((participant) => participant.userId));
+    const uniqueUserIds = new Set(participants.map(participant => participant.userId));
     if (uniqueUserIds.size !== participants.length) {
       throw new BadRequestException('Кожен підписант має бути унікальним');
     }
@@ -1150,12 +1351,18 @@ export class DocumentsService {
 
     for (let index = 0; index < sortedOrders.length; index += 1) {
       if (sortedOrders[index] !== index + 1) {
-        throw new BadRequestException('Порядок підписання має починатися з 1 та бути без пропусків');
+        throw new BadRequestException(
+          'Порядок підписання має починатися з 1 та бути без пропусків',
+        );
       }
     }
   }
 
-  private assertSupportedUploadFile(mimeType: string, sizeBytes: number, originalFileName: string): void {
+  private assertSupportedUploadFile(
+    mimeType: string,
+    sizeBytes: number,
+    originalFileName: string,
+  ): void {
     if (sizeBytes > 40 * 1024 * 1024) {
       throw new BadRequestException('Файл не може бути більший за 40 МБ');
     }

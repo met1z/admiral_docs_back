@@ -1,5 +1,5 @@
 import { Transform } from 'class-transformer';
-import { IsEnum, IsIn, IsInt, IsOptional, IsString, Min } from 'class-validator';
+import { IsBoolean, IsEnum, IsIn, IsInt, IsOptional, IsString, Min } from 'class-validator';
 
 import { DocumentStatus } from '../enums/document-status.enum';
 
@@ -36,6 +36,11 @@ export class DocumentQueryDto {
   @IsOptional()
   @IsIn(['new', 'repeat'])
   revisionType?: 'new' | 'repeat';
+
+  @IsOptional()
+  @Transform(({ value }) => value === true || value === 'true' || value === '1')
+  @IsBoolean()
+  requiresAction?: boolean;
 
   @IsOptional()
   @Transform(({ value }) => Number(value))

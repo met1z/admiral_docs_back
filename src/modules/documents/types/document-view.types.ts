@@ -18,6 +18,8 @@ export type DocumentListItem = {
   lastRejectionReason: string | null;
   lastRejectedByUserId: number | null;
   lastRejectedAt: Date | null;
+  refundedByUserId: number | null;
+  refundedAt: Date | null;
   completedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
@@ -39,6 +41,14 @@ export type DocumentHistoryEventView = {
   message: string | null;
   reason: string | null;
   metadata: Record<string, unknown> | null;
+  createdAt: Date;
+};
+
+export type DocumentCommentView = {
+  id: number;
+  actorUserId: number;
+  actorFullName: string;
+  message: string;
   createdAt: Date;
 };
 
@@ -71,6 +81,8 @@ export type DocumentDetailView = {
   lastRejectionReason: string | null;
   lastRejectedByUserId: number | null;
   lastRejectedAt: Date | null;
+  refundedByUserId: number | null;
+  refundedAt: Date | null;
   completedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
@@ -86,6 +98,7 @@ export type DocumentDetailView = {
     downloadUrl: string | null;
   } | null;
   participants: DocumentParticipantView[];
+  comments: DocumentCommentView[];
   history: DocumentHistoryEventView[];
   requiresAction: boolean;
   myParticipantId: number | null;

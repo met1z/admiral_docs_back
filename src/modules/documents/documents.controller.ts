@@ -18,6 +18,7 @@ import { memoryStorage } from 'multer';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { AuthenticatedUser } from '../../common/types/authenticated-user.type';
 import { CreateDocumentDto } from './dto/create-document.dto';
+import { AddDocumentCommentDto } from './dto/add-document-comment.dto';
 import { DocumentQueryDto } from './dto/document-query.dto';
 import { RejectParticipantDto } from './dto/reject-participant.dto';
 import { SendAdditionalApprovalDto } from './dto/send-additional-approval.dto';
@@ -88,6 +89,20 @@ export class DocumentsController {
     @CurrentUser() user: AuthenticatedUser,
   ) {
     return this.documentsService.updateFile(id, dto, user);
+  }
+
+  @Post(':id/comments')
+  addComment(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() dto: AddDocumentCommentDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.documentsService.addComment(id, dto, user);
+  }
+
+  @Post(':id/refund')
+  refund(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: AuthenticatedUser) {
+    return this.documentsService.refundDocument(id, user);
   }
 
   @Delete(':id')

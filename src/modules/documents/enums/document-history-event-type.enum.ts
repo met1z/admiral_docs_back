@@ -12,5 +12,6 @@ export enum DocumentHistoryEventType {
   RETURNED_FOR_REVISION = 'returned_for_revision',
   RESUBMITTED = 'resubmitted',
   COMPLETED = 'completed',
+  COMMENT_ADDED = 'comment_added',
+  REFUNDED = 'refunded',
 }
-

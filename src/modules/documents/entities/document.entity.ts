@@ -40,6 +40,12 @@ export class DocumentEntity {
   @Column({ name: 'last_rejected_at', type: 'timestamptz', nullable: true })
   lastRejectedAt!: Date | null;
 
+  @Column({ name: 'refunded_by_user_id', type: 'int', nullable: true })
+  refundedByUserId!: number | null;
+
+  @Column({ name: 'refunded_at', type: 'timestamptz', nullable: true })
+  refundedAt!: Date | null;
+
   @Column({ name: 'completed_at', type: 'timestamptz', nullable: true })
   completedAt!: Date | null;
 

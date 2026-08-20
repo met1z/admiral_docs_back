@@ -11,6 +11,7 @@ import { Role } from '../users/user-role.enum';
 import { UserEntity } from '../users/user.entity';
 import { DocumentsService } from './documents.service';
 import { CreateDocumentDto } from './dto/create-document.dto';
+import { AddDocumentCommentDto } from './dto/add-document-comment.dto';
 import { DocumentFileDto } from './dto/document-file.dto';
 import { DocumentQueryDto, DocumentSortBy } from './dto/document-query.dto';
 import { RejectParticipantDto } from './dto/reject-participant.dto';
@@ -130,6 +131,7 @@ describe('DocumentsService', () => {
   let service: DocumentsService;
   let documentTypesRepository: RepoMock<unknown>;
   let documentsRepository: RepoMock<unknown>;
+  let documentCommentsRepository: RepoMock<unknown>;
   let documentFilesRepository: RepoMock<unknown>;
   let documentParticipantsRepository: RepoMock<unknown>;
   let documentHistoryEventsRepository: RepoMock<unknown>;
@@ -143,6 +145,7 @@ describe('DocumentsService', () => {
   beforeEach(() => {
     documentTypesRepository = createRepoMock();
     documentsRepository = createRepoMock();
+    documentCommentsRepository = createRepoMock();
     documentFilesRepository = createRepoMock();
     documentParticipantsRepository = createRepoMock();
     documentHistoryEventsRepository = createRepoMock();
@@ -183,10 +186,12 @@ describe('DocumentsService', () => {
     countQb = qbPair.countQb;
     documentsRepository.createQueryBuilder.mockReturnValue(qb as any);
     documentParticipantsRepository.createQueryBuilder.mockReturnValue(qb as any);
+    documentCommentsRepository.find.mockResolvedValue([]);
 
     service = new DocumentsService(
       documentTypesRepository as unknown as Repository<any>,
       documentsRepository as unknown as Repository<any>,
+      documentCommentsRepository as unknown as Repository<any>,
       documentFilesRepository as unknown as Repository<any>,
       documentParticipantsRepository as unknown as Repository<any>,
       documentHistoryEventsRepository as unknown as Repository<any>,
@@ -253,6 +258,60 @@ describe('DocumentsService', () => {
         requiresAction: false,
       }),
     );
+  });
+
+  it('filters documents requiring the current user action', async () => {
+    const currentUser = { ...actor, userId: 2, email: 'signer@test.com' };
+
+    qb.getRawMany.mockResolvedValue([]);
+    countQb.getCount.mockResolvedValue(0);
+
+    await service.list({ page: 1, requiresAction: true } as DocumentQueryDto, currentUser);
+
+    expect(qb.andWhere).toHaveBeenCalledWith(
+      expect.stringContaining('current_action_user.id = :currentUserId'),
+      expect.objectContaining({ currentUserId: 2 }),
+    );
+    expect(qb.andWhere).toHaveBeenCalledWith(
+      expect.stringContaining('document.status IN (:...requiresActionStatuses)'),
+      expect.objectContaining({ requiresActionStatuses: [DocumentStatus.REJECTED, DocumentStatus.REFUNDED] }),
+    );
+  });
+
+  it('marks rejected creator documents as requiring action in the list', async () => {
+    const currentUser = { ...actor };
+
+    qb.getRawMany.mockResolvedValue([
+      {
+        document_id: 100,
+        document_type_id: 10,
+        document_created_by_user_id: 1,
+        document_name: 'Returned doc',
+        document_status: DocumentStatus.REJECTED,
+        document_submission_round: 1,
+        document_last_rejection_reason: 'Need fixes',
+        document_last_rejected_by_user_id: 2,
+        document_last_rejected_at: new Date('2026-08-14T10:00:00Z'),
+        document_completed_at: null,
+        document_refunded_by_user_id: null,
+        document_refunded_at: null,
+        document_created_at: new Date('2026-08-14T10:00:00Z'),
+        document_updated_at: new Date('2026-08-14T10:00:00Z'),
+        document_type_name: 'Contract',
+        creator_first_name: 'Owner',
+        creator_last_name: 'One',
+        creator_email: 'owner@test.com',
+        current_action_user_id: null,
+        current_action_first_name: null,
+        current_action_last_name: null,
+        current_action_email: null,
+      },
+    ]);
+    countQb.getCount.mockResolvedValue(1);
+
+    const result = await service.list({ page: 1, requiresAction: true } as DocumentQueryDto, currentUser);
+
+    expect(result.items[0]?.requiresAction).toBe(true);
   });
 
   it('uploads a supported file to R2 and rejects invalid files', async () => {
@@ -512,7 +571,7 @@ describe('DocumentsService', () => {
     );
   });
 
-  it('deletes document and its R2 file for initiator when not completed', async () => {
+  it('adds a comment and tracks it in history', async () => {
     const document = {
       id: 10,
       typeId: 10,
@@ -523,6 +582,170 @@ describe('DocumentsService', () => {
       lastRejectionReason: null,
       lastRejectedByUserId: null,
       lastRejectedAt: null,
+      completedAt: null,
+      createdAt: new Date('2026-08-14T10:00:00Z'),
+      updatedAt: new Date('2026-08-14T10:00:00Z'),
+    };
+
+    documentsRepository.createQueryBuilder().getOne.mockResolvedValue(document);
+    documentTypesRepository.findOne.mockResolvedValue({ id: 10, name: 'Type', code: 'type', sortOrder: 1 });
+    documentFilesRepository.findOne.mockResolvedValue(null);
+    documentCommentsRepository.save.mockResolvedValue({
+      id: 900,
+      documentId: 10,
+      actorUserId: actor.userId,
+      message: 'Looks good to me',
+      createdAt: new Date('2026-08-14T10:00:00Z'),
+    });
+    documentCommentsRepository.find.mockResolvedValue([
+      {
+        id: 900,
+        documentId: 10,
+        actorUserId: actor.userId,
+        message: 'Looks good to me',
+        createdAt: new Date('2026-08-14T10:00:00Z'),
+      },
+    ]);
+    documentParticipantsRepository.find.mockResolvedValue([]);
+    documentHistoryEventsRepository.save.mockImplementation(async (value) => value);
+    documentHistoryEventsRepository.find.mockResolvedValue([
+      {
+        id: 900,
+        documentId: 10,
+        actorUserId: actor.userId,
+        participantId: null,
+        targetUserId: null,
+        eventType: DocumentHistoryEventType.COMMENT_ADDED,
+        message: 'Looks good to me',
+        reason: null,
+        metadata: null,
+        createdAt: new Date('2026-08-14T10:00:00Z'),
+      },
+    ]);
+
+    const result = await service.addComment(
+      10,
+      { comment: 'Looks good to me' } as AddDocumentCommentDto,
+      actor,
+    );
+
+    expect(documentCommentsRepository.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        documentId: 10,
+        actorUserId: actor.userId,
+        message: 'Looks good to me',
+      }),
+    );
+    expect(documentHistoryEventsRepository.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventType: DocumentHistoryEventType.COMMENT_ADDED,
+        message: 'Looks good to me',
+      }),
+    );
+    expect(result.history).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          eventType: DocumentHistoryEventType.COMMENT_ADDED,
+          message: 'Looks good to me',
+        }),
+      ]),
+    );
+  });
+
+  it('refunds a document only for the initiator', async () => {
+    const document = {
+      id: 10,
+      typeId: 10,
+      createdByUserId: actor.userId,
+      name: 'Doc',
+      status: DocumentStatus.IN_PROGRESS,
+      submissionRound: 1,
+      lastRejectionReason: null,
+      lastRejectedByUserId: null,
+      lastRejectedAt: null,
+      completedAt: null,
+      refundedByUserId: null,
+      refundedAt: null,
+      createdAt: new Date('2026-08-14T10:00:00Z'),
+      updatedAt: new Date('2026-08-14T10:00:00Z'),
+    };
+
+    documentsRepository.createQueryBuilder().getOne.mockResolvedValue(document);
+    documentTypesRepository.findOne.mockResolvedValue({ id: 10, name: 'Type', code: 'type', sortOrder: 1 });
+    documentFilesRepository.findOne.mockResolvedValue(null);
+    documentCommentsRepository.find.mockResolvedValue([]);
+    documentParticipantsRepository.find.mockResolvedValue([]);
+    documentHistoryEventsRepository.find.mockResolvedValue([]);
+    documentsRepository.save.mockImplementation(async (value) => value);
+
+    const result = await service.refundDocument(10, actor);
+
+    expect(documentsRepository.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: DocumentStatus.REFUNDED,
+        refundedByUserId: actor.userId,
+      }),
+    );
+    expect(documentHistoryEventsRepository.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventType: DocumentHistoryEventType.REFUNDED,
+      }),
+    );
+    expect(result.status).toBe(DocumentStatus.REFUNDED);
+  });
+
+  it('does not refund a document when someone has already signed it', async () => {
+    const document = {
+      id: 10,
+      typeId: 10,
+      createdByUserId: actor.userId,
+      name: 'Doc',
+      status: DocumentStatus.IN_PROGRESS,
+      submissionRound: 1,
+      lastRejectionReason: null,
+      lastRejectedByUserId: null,
+      lastRejectedAt: null,
+      completedAt: null,
+      refundedByUserId: null,
+      refundedAt: null,
+      createdAt: new Date('2026-08-14T10:00:00Z'),
+      updatedAt: new Date('2026-08-14T10:00:00Z'),
+    };
+
+    documentsRepository.createQueryBuilder().getOne.mockResolvedValue(document);
+    documentParticipantsRepository.find.mockResolvedValue([
+      {
+        id: 1,
+        documentId: 10,
+        userId: 2,
+        participantType: DocumentParticipantType.SIGNER,
+        order: 1,
+        addedByUserId: actor.userId,
+        isPreservedAfterRejection: false,
+        signedStatus: DocumentParticipantStatus.COMPLETED,
+        createdAt: new Date('2026-08-14T10:00:00Z'),
+        updatedAt: new Date('2026-08-14T10:00:00Z'),
+      },
+    ]);
+
+    await expect(service.refundDocument(10, actor)).rejects.toThrow('Відгукнути можна лише документ без підписів');
+    expect(documentsRepository.save).not.toHaveBeenCalled();
+    expect(documentHistoryEventsRepository.save).not.toHaveBeenCalled();
+  });
+
+  it('deletes refunded document and its R2 file for initiator', async () => {
+    const document = {
+      id: 10,
+      typeId: 10,
+      createdByUserId: actor.userId,
+      name: 'Doc',
+      status: DocumentStatus.REFUNDED,
+      submissionRound: 1,
+      lastRejectionReason: null,
+      lastRejectedByUserId: null,
+      lastRejectedAt: null,
+      refundedByUserId: actor.userId,
+      refundedAt: new Date('2026-08-14T10:00:00Z'),
       completedAt: null,
       createdAt: new Date('2026-08-14T10:00:00Z'),
       updatedAt: new Date('2026-08-14T10:00:00Z'),
@@ -544,6 +767,36 @@ describe('DocumentsService', () => {
     const result = await service.deleteDocument(10, actor);
 
     expect(r2StorageService.deleteObject).toHaveBeenCalledWith('docs/10/file.txt');
+    expect(documentFilesRepository.delete).toHaveBeenCalledWith({ documentId: 10 });
+    expect(documentParticipantsRepository.delete).toHaveBeenCalledWith({ documentId: 10 });
+    expect(documentsRepository.delete).toHaveBeenCalledWith({ id: 10 });
+    expect(result).toEqual({ deleted: true });
+  });
+
+  it('deletes rejected document for initiator', async () => {
+    const document = {
+      id: 10,
+      typeId: 10,
+      createdByUserId: actor.userId,
+      name: 'Doc',
+      status: DocumentStatus.REJECTED,
+      submissionRound: 1,
+      lastRejectionReason: 'Need changes',
+      lastRejectedByUserId: actor.userId,
+      lastRejectedAt: new Date('2026-08-14T10:00:00Z'),
+      refundedByUserId: null,
+      refundedAt: null,
+      completedAt: null,
+      createdAt: new Date('2026-08-14T10:00:00Z'),
+      updatedAt: new Date('2026-08-14T10:00:00Z'),
+    };
+
+    documentsRepository.createQueryBuilder().getOne.mockResolvedValue(document);
+    documentFilesRepository.findOne.mockResolvedValue(null);
+
+    const result = await service.deleteDocument(10, actor);
+
+    expect(r2StorageService.deleteObject).not.toHaveBeenCalled();
     expect(documentFilesRepository.delete).toHaveBeenCalledWith({ documentId: 10 });
     expect(documentParticipantsRepository.delete).toHaveBeenCalledWith({ documentId: 10 });
     expect(documentsRepository.delete).toHaveBeenCalledWith({ id: 10 });
@@ -690,6 +943,62 @@ describe('DocumentsService', () => {
     ).rejects.toBeInstanceOf(ConflictException);
   });
 
+  it('does not allow adding a participant who is already a signer', async () => {
+    const document = {
+      id: 10,
+      typeId: 10,
+      createdByUserId: actor.userId,
+      name: 'Doc',
+      status: DocumentStatus.IN_PROGRESS,
+      submissionRound: 1,
+      lastRejectionReason: null,
+      lastRejectedByUserId: null,
+      lastRejectedAt: null,
+      completedAt: null,
+      createdAt: new Date('2026-08-14T10:00:00Z'),
+      updatedAt: new Date('2026-08-14T10:00:00Z'),
+    };
+    const currentParticipant = {
+      id: 20,
+      documentId: 10,
+      userId: 2,
+      participantType: DocumentParticipantType.SIGNER,
+      order: 1,
+      addedByUserId: actor.userId,
+      isPreservedAfterRejection: false,
+      signedStatus: DocumentParticipantStatus.PENDING,
+      createdAt: new Date('2026-08-14T10:00:00Z'),
+      updatedAt: new Date('2026-08-14T10:00:00Z'),
+    };
+    const anotherSigner = {
+      id: 21,
+      documentId: 10,
+      userId: 3,
+      participantType: DocumentParticipantType.SIGNER,
+      order: 2,
+      addedByUserId: actor.userId,
+      isPreservedAfterRejection: false,
+      signedStatus: DocumentParticipantStatus.PENDING,
+      createdAt: new Date('2026-08-14T10:00:00Z'),
+      updatedAt: new Date('2026-08-14T10:00:00Z'),
+    };
+
+    documentsRepository.createQueryBuilder().getOne.mockResolvedValue(document);
+    documentParticipantsRepository.find.mockResolvedValue([currentParticipant, anotherSigner]);
+    documentTypesRepository.findOne.mockResolvedValue({ id: 10, name: 'Type', code: 'type', sortOrder: 1 });
+    documentFilesRepository.findOne.mockResolvedValue(null);
+    documentHistoryEventsRepository.find.mockResolvedValue([]);
+
+    await expect(
+      service.sendForAdditionalApproval(
+        10,
+        20,
+        { userIds: [3], reason: 'Business check' } as SendAdditionalApprovalDto,
+        { ...actor, userId: 2, email: 'signer@test.com' },
+      ),
+    ).rejects.toThrow('Користувач 3 вже є серед підписантів або погоджувачів');
+  });
+
   it('rejects a participant, removes unprotected additional approvers, and resets others', async () => {
     const document = {
       id: 10,
@@ -764,6 +1073,13 @@ describe('DocumentsService', () => {
     expect(documentHistoryEventsRepository.save).toHaveBeenCalledWith(
       expect.objectContaining({ eventType: DocumentHistoryEventType.RETURNED_FOR_REVISION }),
     );
+    expect(documentCommentsRepository.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        documentId: 10,
+        actorUserId: 2,
+        message: 'Повернуто: "Not enough data"',
+      }),
+    );
   });
 
   it('re-submits rejected documents and increments the submission round', async () => {
@@ -816,6 +1132,60 @@ describe('DocumentsService', () => {
       ]),
     );
     expect(result.submissionRound).toBe(2);
+  });
+
+  it('re-submits refunded documents and increments the submission round', async () => {
+    const document = {
+      id: 10,
+      typeId: 10,
+      createdByUserId: actor.userId,
+      name: 'Doc',
+      status: DocumentStatus.REFUNDED,
+      submissionRound: 2,
+      lastRejectionReason: null,
+      lastRejectedByUserId: null,
+      lastRejectedAt: null,
+      refundedByUserId: 2,
+      refundedAt: new Date('2026-08-14T10:00:00Z'),
+      completedAt: null,
+      createdAt: new Date('2026-08-14T10:00:00Z'),
+      updatedAt: new Date('2026-08-14T10:00:00Z'),
+    };
+    const participant = {
+      id: 20,
+      documentId: 10,
+      userId: 2,
+      participantType: DocumentParticipantType.SIGNER,
+      order: 1,
+      addedByUserId: actor.userId,
+      isPreservedAfterRejection: false,
+      signedStatus: DocumentParticipantStatus.REJECTED,
+      createdAt: new Date('2026-08-14T10:00:00Z'),
+      updatedAt: new Date('2026-08-14T10:00:00Z'),
+    };
+
+    documentsRepository.createQueryBuilder().getOne.mockResolvedValue(document);
+    documentParticipantsRepository.find.mockResolvedValue([participant]);
+    documentParticipantsRepository.save.mockImplementation(async (value) => value);
+    documentsRepository.save.mockImplementation(async (value) => value);
+    documentHistoryEventsRepository.find.mockResolvedValue([]);
+    documentFilesRepository.findOne.mockResolvedValue(null);
+    documentTypesRepository.findOne.mockResolvedValue({ id: 10, name: 'Type', code: 'type', sortOrder: 1 });
+
+    const result = await service.resubmit(10, actor);
+
+    expect(documentsRepository.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: DocumentStatus.IN_PROGRESS,
+        submissionRound: 3,
+      }),
+    );
+    expect(documentParticipantsRepository.save).toHaveBeenCalledWith(
+      expect.arrayContaining([
+        expect.objectContaining({ signedStatus: DocumentParticipantStatus.PENDING }),
+      ]),
+    );
+    expect(result.submissionRound).toBe(3);
   });
 
   it('returns file URLs directly for view and download', async () => {
